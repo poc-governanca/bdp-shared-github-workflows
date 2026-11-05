@@ -32,6 +32,9 @@
 
 /scripts/security/ @org/platform-admins @org/security-reviewers
 
+/.github/workflows/iac-security.yml @org/platform-admins @org/security-reviewers
+
+
 # ============================================================
 # CI WORKFLOWS
 # ============================================================
