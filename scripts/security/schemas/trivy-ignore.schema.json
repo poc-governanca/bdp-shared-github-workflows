@@ -1,44 +1,32 @@
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.com/schemas/trivy-ignore.schema.json",
-  "title": "Trivy exception list",
-  "description": "Time-bound, documented exceptions for Trivy findings.",
+"containerScope": {
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "exceptions"],
+
+  "required": [
+    "image",
+    "package",
+    "package_type"
+  ],
+
   "properties": {
-    "version": {
-      "const": 1
+    "image": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500,
+      "pattern": "^[A-Za-z0-9._-]+$"
     },
-    "exceptions": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["id", "reason", "expires"],
-        "properties": {
-          "id": {
-            "type": "string",
-            "pattern": "^(CVE-[0-9]{4}-[0-9]{4,}|[A-Z][A-Z0-9_-]+)$"
-          },
-          "reason": {
-            "type": "string",
-            "minLength": 10
-          },
-          "expires": {
-            "type": "string",
-            "format": "date"
-          },
-          "paths": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "minLength": 1
-            },
-            "uniqueItems": true
-          }
-        }
-      }
+
+    "package": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300
+    },
+
+    "package_type": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100,
+        "pattern": "^[A-Za-z0-9._-]+$"
     }
   }
 }
