@@ -28,6 +28,9 @@
 /.github/workflows/terraform-security.yml \
 @org/platform-admins @org/security-reviewers
 
+/.github/actions/validate-trivy-exceptions/ @org/platform-admins @org/security-reviewers
+
+/scripts/security/ @org/platform-admins @org/security-reviewers
 
 # ============================================================
 # CI WORKFLOWS

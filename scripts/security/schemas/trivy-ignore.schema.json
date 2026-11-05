@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/trivy-ignore.schema.json",
+  "title": "Trivy exception list",
+  "description": "Time-bound, documented exceptions for Trivy findings.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "exceptions"],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "exceptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "reason", "expires"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^(CVE-[0-9]{4}-[0-9]{4,}|[A-Z][A-Z0-9_-]+)$"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 10
+          },
+          "expires": {
+            "type": "string",
+            "format": "date"
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          }
+        }
+      }
+    }
+  }
+}
