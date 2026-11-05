@@ -1,0 +1,52 @@
+# ============================================================
+# DEFAULT OWNERSHIP
+# ============================================================
+
+* @org/platform-admins
+
+
+# ============================================================
+# GITHUB GOVERNANCE
+# ============================================================
+
+/.github/CODEOWNERS @org/platform-admins @org/security-reviewers
+
+
+# ============================================================
+# SECURITY WORKFLOWS
+# ============================================================
+
+/.github/workflows/security.yml \
+@org/platform-admins @org/security-reviewers
+
+/.github/workflows/dependency-review.yml \
+@org/platform-admins @org/security-reviewers
+
+/.github/workflows/container-security.yml \
+@org/platform-admins @org/security-reviewers
+
+/.github/workflows/terraform-security.yml \
+@org/platform-admins @org/security-reviewers
+
+
+# ============================================================
+# CI WORKFLOWS
+# ============================================================
+
+/.github/workflows/dotnet-ci.yml @org/platform-admins
+
+/.github/workflows/java-ci.yml @org/platform-admins
+
+/.github/workflows/node-ci.yml @org/platform-admins
+
+/.github/workflows/python-ci.yml @org/platform-admins
+
+/.github/workflows/terraform-ci.yml @org/platform-admins
+
+
+# ============================================================
+# DEPLOYMENT
+# ============================================================
+
+/.github/workflows/deploy.yml \
+@org/platform-admins @org/security-reviewers
