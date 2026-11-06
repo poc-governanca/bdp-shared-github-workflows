@@ -1,0 +1,586 @@
+name: Reusable Detect Changes
+
+on:
+  workflow_call:
+    inputs:
+      manifest_path:
+        description: "Path to the repository components manifest"
+        required: false
+        type: string
+        default: ".github/components.yml"
+
+      tooling_ref:
+        description: >
+          Version or commit SHA of the shared components tooling.
+        required: false
+        type: string
+        default: "v1"
+
+      base_sha:
+        description: >
+          Optional base commit SHA. When empty, the workflow
+          determines the base according to the GitHub event.
+        required: false
+        type: string
+        default: ""
+
+      head_sha:
+        description: >
+          Optional head commit SHA. Defaults to github.sha.
+        required: false
+        type: string
+        default: ""
+
+      evidence_retention_days:
+        description: "Change-detection evidence retention"
+        required: false
+        type: number
+        default: 30
+
+    outputs:
+      matrix:
+        description: "GitHub Actions matrix of affected components"
+        value: ${{ jobs.detect-changes.outputs.matrix }}
+
+      affected_components:
+        description: "JSON array containing affected component names"
+        value: ${{ jobs.detect-changes.outputs.affected-components }}
+
+      affected_components_count:
+        description: "Number of affected components"
+        value: ${{ jobs.detect-changes.outputs.affected-components-count }}
+
+      has_affected_components:
+        description: "Whether at least one component was affected"
+        value: ${{ jobs.detect-changes.outputs.has-affected-components }}
+
+      full_fan_out:
+        description: "Whether all components and controls were selected"
+        value: ${{ jobs.detect-changes.outputs.full-fan-out }}
+
+      github_actions_affected:
+        description: "Whether GitHub Actions controls must execute"
+        value: ${{ jobs.detect-changes.outputs.github-actions-affected }}
+
+      infrastructure_affected:
+        description: "Whether infrastructure controls must execute"
+        value: ${{ jobs.detect-changes.outputs.infrastructure-affected }}
+
+      infrastructure_scan_path:
+        description: "Configured Infrastructure as Code scan path"
+        value: ${{ jobs.detect-changes.outputs.infrastructure-scan-path }}
+
+permissions:
+  contents: read
+
+jobs:
+  detect-changes:
+    name: Detect Affected Components
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    outputs:
+      matrix: ${{ steps.detect.outputs.matrix }}
+
+      affected-components: >-
+        ${{ steps.detect.outputs.affected-components }}
+
+      affected-components-count: >-
+        ${{ steps.detect.outputs.affected-components-count }}
+
+      has-affected-components: >-
+        ${{ steps.detect.outputs.has-affected-components }}
+
+      full-fan-out: >-
+        ${{ steps.detect.outputs.full-fan-out }}
+
+      github-actions-affected: >-
+        ${{ steps.detect.outputs.github-actions-affected }}
+
+      infrastructure-affected: >-
+        ${{ steps.detect.outputs.infrastructure-affected }}
+
+      infrastructure-scan-path: >-
+        ${{ steps.detect.outputs.infrastructure-scan-path }}
+
+    steps:
+
+      # =======================================================
+      # Input validation
+      # =======================================================
+
+      - name: Validate inputs
+        shell: bash
+        env:
+          MANIFEST_PATH: ${{ inputs.manifest_path }}
+          TOOLING_REF: ${{ inputs.tooling_ref }}
+          RETENTION_DAYS: ${{ inputs.evidence_retention_days }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${MANIFEST_PATH}" ]]; then
+            echo "::error::manifest_path cannot be empty."
+            exit 1
+          fi
+
+          if [[ "${MANIFEST_PATH}" == /* ]]; then
+            echo "::error::manifest_path must be repository-relative."
+            exit 1
+          fi
+
+          if [[ "${MANIFEST_PATH}" == *".."* ]]; then
+            echo "::error::Parent traversal is not permitted in manifest_path."
+            exit 1
+          fi
+
+          if [[ -z "${TOOLING_REF}" ]]; then
+            echo "::error::tooling_ref cannot be empty."
+            exit 1
+          fi
+
+          if ! [[ "${RETENTION_DAYS}" =~ ^[0-9]+$ ]]; then
+            echo "::error::evidence_retention_days must be numeric."
+            exit 1
+          fi
+
+          if [[ "${RETENTION_DAYS}" -lt 1 || "${RETENTION_DAYS}" -gt 90 ]]; then
+            echo "::error::evidence_retention_days must be between 1 and 90."
+            exit 1
+          fi
+
+      # =======================================================
+      # Application repository
+      # =======================================================
+
+      - name: Checkout application repository
+        uses: actions/checkout@<APPROVED_FULL_SHA> # approved version
+        with:
+          fetch-depth: 0
+
+      - name: Validate manifest exists
+        shell: bash
+        env:
+          MANIFEST_PATH: ${{ inputs.manifest_path }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! -f "${MANIFEST_PATH}" ]]; then
+            echo "::error::Components manifest does not exist: ${MANIFEST_PATH}"
+            exit 1
+          fi
+
+      # =======================================================
+      # Shared tooling
+      # =======================================================
+
+      - name: Checkout shared components tooling
+        uses: actions/checkout@<APPROVED_FULL_SHA> # approved version
+        with:
+          repository: poc-governanca/bdp-shared-github-workflows
+          ref: ${{ inputs.tooling_ref }}
+          path: ".shared-workflows"
+
+      - name: Validate shared tooling files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          REQUIRED_FILES=(
+            ".shared-workflows/scripts/components/validate-components.py"
+            ".shared-workflows/scripts/components/detect-changes.py"
+            ".shared-workflows/scripts/components/schemas/components.schema.json"
+          )
+
+          for FILE in "${REQUIRED_FILES[@]}"; do
+            if [[ ! -f "${FILE}" ]]; then
+              echo "::error::Required tooling file does not exist: ${FILE}"
+              exit 1
+            fi
+          done
+
+      # =======================================================
+      # Python dependencies
+      # =======================================================
+
+      - name: Set up Python
+        uses: actions/setup-python@<APPROVED_FULL_SHA> # approved version
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install component tooling dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python -m pip install \
+            "PyYAML==<APPROVED_VERSION>" \
+            "jsonschema==<APPROVED_VERSION>"
+
+      # =======================================================
+      # Manifest validation
+      # =======================================================
+
+      - name: Validate components manifest
+        shell: bash
+        env:
+          MANIFEST_PATH: ${{ inputs.manifest_path }}
+        run: |
+          set -euo pipefail
+
+          python \
+            ".shared-workflows/scripts/components/validate-components.py" \
+            --manifest "${MANIFEST_PATH}" \
+            --schema \
+              ".shared-workflows/scripts/components/schemas/components.schema.json" \
+            --repository-root "."
+
+      # =======================================================
+      # Commit range resolution
+      # =======================================================
+
+      - name: Resolve commit range
+        id: commits
+        shell: bash
+        env:
+          INPUT_BASE_SHA: ${{ inputs.base_sha }}
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+
+          EVENT_NAME: ${{ github.event_name }}
+          GITHUB_SHA_VALUE: ${{ github.sha }}
+
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          BASE_SHA="${INPUT_BASE_SHA}"
+          HEAD_SHA="${INPUT_HEAD_SHA}"
+
+          if [[ -z "${HEAD_SHA}" ]]; then
+            HEAD_SHA="${GITHUB_SHA_VALUE}"
+          fi
+
+          if [[ -z "${BASE_SHA}" ]]; then
+
+            case "${EVENT_NAME}" in
+
+              pull_request)
+                BASE_SHA="${PR_BASE_SHA}"
+                HEAD_SHA="${PR_HEAD_SHA}"
+                ;;
+
+              push)
+                BASE_SHA="${BEFORE_SHA}"
+                ;;
+
+              workflow_dispatch)
+                if git rev-parse "${HEAD_SHA}^" > /dev/null 2>&1; then
+                  BASE_SHA="$(
+                    git rev-parse "${HEAD_SHA}^"
+                  )"
+                else
+                  echo "::error::Unable to determine base SHA for workflow_dispatch."
+                  echo "::error::Provide base_sha explicitly."
+                  exit 1
+                fi
+                ;;
+
+              schedule)
+                if git rev-parse "${HEAD_SHA}^" > /dev/null 2>&1; then
+                  BASE_SHA="$(
+                    git rev-parse "${HEAD_SHA}^"
+                  )"
+                else
+                  echo "::error::Unable to determine base SHA for schedule."
+                  exit 1
+                fi
+                ;;
+
+              *)
+                echo "::error::Unsupported event for automatic commit-range resolution: ${EVENT_NAME}"
+                echo "::error::Provide base_sha and head_sha explicitly."
+                exit 1
+                ;;
+            esac
+          fi
+
+          ZERO_SHA="0000000000000000000000000000000000000000"
+
+          if [[ "${BASE_SHA}" == "${ZERO_SHA}" ]]; then
+            if git rev-parse "${HEAD_SHA}^" > /dev/null 2>&1; then
+              BASE_SHA="$(
+                git rev-parse "${HEAD_SHA}^"
+              )"
+            else
+              echo "::error::Initial push has no parent commit."
+              echo "::error::Unable to build a safe change set."
+              exit 1
+            fi
+          fi
+
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            echo "::error::Base commit is not available locally: ${BASE_SHA}"
+            exit 1
+          fi
+
+          if ! git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
+            echo "::error::Head commit is not available locally: ${HEAD_SHA}"
+            exit 1
+          fi
+
+          echo "base-sha=${BASE_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "head-sha=${HEAD_SHA}" >> "${GITHUB_OUTPUT}"
+
+          echo "Base SHA: ${BASE_SHA}"
+          echo "Head SHA: ${HEAD_SHA}"
+
+      # =======================================================
+      # Changed files
+      # =======================================================
+
+      - name: Generate changed-files list
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.commits.outputs.base-sha }}
+          HEAD_SHA: ${{ steps.commits.outputs.head-sha }}
+        run: |
+          set -euo pipefail
+
+          git diff \
+            --name-only \
+            --diff-filter=ACMRDTUXB \
+            "${BASE_SHA}" \
+            "${HEAD_SHA}" \
+            > "changed-files.txt"
+
+          sort \
+            --unique \
+            --output="changed-files.txt" \
+            "changed-files.txt"
+
+          echo "Changed files:"
+          cat "changed-files.txt"
+
+          echo "Changed file count: $(wc -l < changed-files.txt)"
+
+      - name: Validate changed-files list
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! -f "changed-files.txt" ]]; then
+            echo "::error::changed-files.txt was not generated."
+            exit 1
+          fi
+
+          while IFS= read -r FILE; do
+
+            if [[ -z "${FILE}" ]]; then
+              continue
+            fi
+
+            if [[ "${FILE}" == /* ]]; then
+              echo "::error::Absolute changed path is not permitted: ${FILE}"
+              exit 1
+            fi
+
+            if [[ "${FILE}" == *"../"* || "${FILE}" == "../"* ]]; then
+              echo "::error::Parent traversal found in changed path: ${FILE}"
+              exit 1
+            fi
+
+          done < "changed-files.txt"
+
+      # =======================================================
+      # Change detection
+      # =======================================================
+
+      - name: Detect affected components
+        id: detect
+        shell: bash
+        env:
+          MANIFEST_PATH: ${{ inputs.manifest_path }}
+        run: |
+          set -euo pipefail
+
+          python \
+            ".shared-workflows/scripts/components/detect-changes.py" \
+            --manifest "${MANIFEST_PATH}" \
+            --changed-files "changed-files.txt" \
+            --output "affected-components.json" \
+            --github-output "${GITHUB_OUTPUT}"
+
+      # =======================================================
+      # Evidence
+      # =======================================================
+
+      - name: Generate change-detection metadata
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.commits.outputs.base-sha }}
+          HEAD_SHA: ${{ steps.commits.outputs.head-sha }}
+          REPOSITORY: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import json
+          import os
+
+          metadata = {
+              "schema_version": 1,
+              "repository": os.environ["REPOSITORY"],
+              "event_name": os.environ["EVENT_NAME"],
+              "base_sha": os.environ["BASE_SHA"],
+              "head_sha": os.environ["HEAD_SHA"],
+              "run_id": os.environ["RUN_ID"],
+              "run_attempt": os.environ["RUN_ATTEMPT"],
+          }
+
+          with open(
+              "change-detection-metadata.json",
+              "w",
+              encoding="utf-8",
+          ) as file:
+              json.dump(
+                  metadata,
+                  file,
+                  indent=2,
+              )
+
+              file.write("\n")
+          PY
+
+      - name: Upload change-detection evidence
+        uses: actions/upload-artifact@<APPROVED_FULL_SHA> # approved version
+        with:
+          name: "change-detection-evidence"
+          retention-days: ${{ inputs.evidence_retention_days }}
+          if-no-files-found: error
+
+          path: |
+            changed-files.txt
+            affected-components.json
+            change-detection-metadata.json
+
+      # =======================================================
+      # Summary
+      # =======================================================
+
+      - name: Generate change-detection summary
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          {
+            echo "## Repository Change Detection"
+            echo
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          if [[ -f "change-detection-metadata.json" ]]; then
+
+            python - <<'PY' >> "${GITHUB_STEP_SUMMARY}"
+          import json
+
+          with open(
+              "change-detection-metadata.json",
+              "r",
+              encoding="utf-8",
+          ) as file:
+              metadata = json.load(file)
+
+          print("| Property | Value |")
+          print("|---|---|")
+          print(
+              f"| Repository | "
+              f"`{metadata['repository']}` |"
+          )
+          print(
+              f"| Event | "
+              f"`{metadata['event_name']}` |"
+          )
+          print(
+              f"| Base SHA | "
+              f"`{metadata['base_sha']}` |"
+          )
+          print(
+              f"| Head SHA | "
+              f"`{metadata['head_sha']}` |"
+          )
+          print()
+          PY
+
+          fi
+
+          if [[ -f "affected-components.json" ]]; then
+
+            python - <<'PY' >> "${GITHUB_STEP_SUMMARY}"
+          import json
+
+          with open(
+              "affected-components.json",
+              "r",
+              encoding="utf-8",
+          ) as file:
+              result = json.load(file)
+
+          print("### Detection Result")
+          print()
+          print("| Property | Value |")
+          print("|---|---|")
+          print(
+              f"| Changed files | "
+              f"{len(result['changed_files'])} |"
+          )
+          print(
+              f"| Full fan-out | "
+              f"{result['full_fan_out']} |"
+          )
+          print(
+              f"| Affected components | "
+              f"{result['affected_component_count']} |"
+          )
+          print(
+              "| GitHub Actions affected | "
+              f"{result['repository_controls']['github_actions']['affected']} |"
+          )
+          print(
+              "| Infrastructure affected | "
+              f"{result['repository_controls']['infrastructure']['affected']} |"
+          )
+          print()
+
+          if result["affected_components"]:
+              print("### Affected Components")
+              print()
+
+              for component in result["affected_components"]:
+                  reasons = result[
+                      "component_details"
+                  ][component]["reasons"]
+
+                  formatted_reasons = ", ".join(
+                      f"`{reason}`"
+                      for reason in reasons
+                  )
+
+                  print(
+                      f"- **{component}**: "
+                      f"{formatted_reasons}"
+                  )
+
+          else:
+              print(
+                  "No application component was affected."
+              )
+          PY
+
+          fi

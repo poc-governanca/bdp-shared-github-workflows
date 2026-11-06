@@ -1,0 +1,136 @@
+name: Reusable CodeQL Security
+
+on:
+  workflow_call:
+    inputs:
+      language:
+        description: "Application language"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  codeql:
+    name: CodeQL Security
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+
+      # =======================================================
+      # Language mapping
+      # =======================================================
+
+      - name: Map CodeQL language
+        id: language
+        shell: bash
+        env:
+          LANGUAGE: ${{ inputs.language }}
+        run: |
+          set -euo pipefail
+
+          case "${LANGUAGE}" in
+
+            dotnet)
+              CODEQL_LANGUAGE="csharp"
+              ;;
+
+            java)
+              CODEQL_LANGUAGE="java-kotlin"
+              ;;
+
+            javascript|typescript)
+              CODEQL_LANGUAGE="javascript-typescript"
+              ;;
+
+            python)
+              CODEQL_LANGUAGE="python"
+              ;;
+
+            go)
+              CODEQL_LANGUAGE="go"
+              ;;
+            
+            actions)
+              CODEQL_LANGUAGE="actions"
+              ;;  
+
+            *)
+              echo "::error::Unsupported language '${LANGUAGE}'."
+              echo "::error::Supported values:"
+              echo "::error::dotnet, java, javascript, typescript, python, go, actions"
+              exit 1
+              ;;
+          esac
+
+          echo "codeql-language=${CODEQL_LANGUAGE}" \
+            >> "${GITHUB_OUTPUT}"
+
+          echo "Application language: ${LANGUAGE}"
+          echo "CodeQL language: ${CODEQL_LANGUAGE}"
+
+      # =======================================================
+      # Checkout
+      # =======================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@<APPROVED_FULL_SHA> # approved version
+        with:
+          fetch-depth: 0
+
+      # =======================================================
+      # CodeQL Initialization
+      # =======================================================
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@<APPROVED_FULL_SHA> # approved version
+        with:
+          languages: ${{ steps.language.outputs.codeql-language }}
+          queries: security-extended
+
+      # =======================================================
+      # Autobuild
+      # =======================================================
+
+      - name: CodeQL Autobuild
+        uses: github/codeql-action/autobuild@<APPROVED_FULL_SHA> # approved version
+
+      # =======================================================
+      # Analysis
+      # =======================================================
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@<APPROVED_FULL_SHA> # approved version
+        with:
+          category: >-
+            /language:${{
+              steps.language.outputs.codeql-language
+            }}
+
+      # =======================================================
+      # Summary
+      # =======================================================
+
+      - name: Generate CodeQL summary
+        if: ${{ always() }}
+        shell: bash
+        env:
+          LANGUAGE: ${{ inputs.language }}
+          CODEQL_LANGUAGE: ${{ steps.language.outputs.codeql-language }}
+        run: |
+          {
+            echo "## CodeQL Security"
+            echo
+            echo "| Configuration | Value |"
+            echo "|---|---|"
+            echo "| Application language | ${LANGUAGE} |"
+            echo "| CodeQL language | ${CODEQL_LANGUAGE} |"
+            echo "| Query suite | security-extended |"
+            echo "| SARIF | GitHub Code Scanning |"
+          } >> "${GITHUB_STEP_SUMMARY}"
