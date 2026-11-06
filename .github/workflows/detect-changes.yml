@@ -1,0 +1,843 @@
+name: Reusable Detect Changes
+
+on:
+  workflow_call:
+    inputs:
+      manifest_path:
+        description: "Path to the repository components manifest"
+        required: false
+        type: string
+        default: ".github/components.yml"
+
+      tooling_ref:
+        description: "Shared components tooling release or commit SHA"
+        required: false
+        type: string
+        default: "v1"
+
+      base_sha:
+        description: "Optional base commit SHA"
+        required: false
+        type: string
+        default: ""
+
+      head_sha:
+        description: "Optional head commit SHA"
+        required: false
+        type: string
+        default: ""
+
+      force_full_fan_out:
+        description: "Force all components and enabled repository controls"
+        required: false
+        type: boolean
+        default: false
+
+      evidence_retention_days:
+        description: "Change-detection evidence retention period"
+        required: false
+        type: number
+        default: 30
+
+    outputs:
+      matrix:
+        description: "Matrix of affected components"
+        value: ${{ jobs.detect-changes.outputs.matrix }}
+
+      affected_components:
+        description: "JSON array of affected component names"
+        value: ${{ jobs.detect-changes.outputs.affected-components }}
+
+      affected_components_count:
+        description: "Number of affected components"
+        value: ${{ jobs.detect-changes.outputs.affected-components-count }}
+
+      has_affected_components:
+        description: "Whether at least one component was affected"
+        value: ${{ jobs.detect-changes.outputs.has-affected-components }}
+
+      full_fan_out:
+        description: "Whether full fan-out was activated"
+        value: ${{ jobs.detect-changes.outputs.full-fan-out }}
+
+      github_actions_affected:
+        description: "Whether repository GitHub Actions controls must run"
+        value: ${{ jobs.detect-changes.outputs.github-actions-affected }}
+
+      infrastructure_affected:
+        description: "Whether repository IaC controls must run"
+        value: ${{ jobs.detect-changes.outputs.infrastructure-affected }}
+
+      infrastructure_scan_path:
+        description: "Repository IaC scan path"
+        value: ${{ jobs.detect-changes.outputs.infrastructure-scan-path }}
+
+      base_sha:
+        description: "Resolved base commit SHA"
+        value: ${{ jobs.detect-changes.outputs.base-sha }}
+
+      head_sha:
+        description: "Resolved head commit SHA"
+        value: ${{ jobs.detect-changes.outputs.head-sha }}
+
+permissions:
+  contents: read
+
+jobs:
+  detect-changes:
+    name: Detect Affected Components
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    outputs:
+      matrix: ${{ steps.detect.outputs.matrix }}
+
+      affected-components: >-
+        ${{ steps.detect.outputs.affected-components }}
+
+      affected-components-count: >-
+        ${{ steps.detect.outputs.affected-components-count }}
+
+      has-affected-components: >-
+        ${{ steps.detect.outputs.has-affected-components }}
+
+      full-fan-out: >-
+        ${{ steps.detect.outputs.full-fan-out }}
+
+      github-actions-affected: >-
+        ${{ steps.detect.outputs.github-actions-affected }}
+
+      infrastructure-affected: >-
+        ${{ steps.detect.outputs.infrastructure-affected }}
+
+      infrastructure-scan-path: >-
+        ${{ steps.detect.outputs.infrastructure-scan-path }}
+
+      base-sha: ${{ steps.commits.outputs.base-sha }}
+      head-sha: ${{ steps.commits.outputs.head-sha }}
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Validate workflow inputs
+        env:
+          MANIFEST_PATH: ${{ inputs.manifest_path }}
+          TOOLING_REF: ${{ inputs.tooling_ref }}
+          INPUT_BASE_SHA: ${{ inputs.base_sha }}
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+          RETENTION_DAYS: ${{ inputs.evidence_retention_days }}
+        run: |
+          set -euo pipefail
+
+          validate_relative_path() {
+            local field_name="$1"
+            local field_value="$2"
+
+            if [[ -z "${field_value}" ]]; then
+              echo "::error::${field_name} cannot be empty."
+              exit 1
+            fi
+
+            if [[ "${field_value}" == /* ]]; then
+              echo "::error::${field_name} must be repository-relative."
+              exit 1
+            fi
+
+            if [[ \
+              "${field_value}" == ".." \
+              || "${field_value}" == ../* \
+              || "${field_value}" == */../* \
+              || "${field_value}" == */.. \
+            ]]; then
+              echo "::error::Parent traversal is not allowed in ${field_name}."
+              exit 1
+            fi
+          }
+
+          validate_optional_sha() {
+            local field_name="$1"
+            local field_value="$2"
+
+            if [[ -z "${field_value}" ]]; then
+              return
+            fi
+
+            if [[ ! "${field_value}" =~ ^[a-fA-F0-9]{40}$ ]]; then
+              echo "::error::${field_name} must be a full 40-character Git SHA."
+              exit 1
+            fi
+          }
+
+          validate_relative_path \
+            "manifest_path" \
+            "${MANIFEST_PATH}"
+
+          if [[ -z "${TOOLING_REF}" ]]; then
+            echo "::error::tooling_ref cannot be empty."
+            exit 1
+          fi
+
+          validate_optional_sha \
+            "base_sha" \
+            "${INPUT_BASE_SHA}"
+
+          validate_optional_sha \
+            "head_sha" \
+            "${INPUT_HEAD_SHA}"
+
+          if ! [[ "${RETENTION_DAYS}" =~ ^[0-9]+$ ]]; then
+            echo "::error::evidence_retention_days must be numeric."
+            exit 1
+          fi
+
+          if [[ "${RETENTION_DAYS}" -lt 1 || "${RETENTION_DAYS}" -gt 90 ]]; then
+            echo "::error::evidence_retention_days must be between 1 and 90."
+            exit 1
+          fi
+
+      - name: Checkout application repository
+        uses: actions/checkout@<APPROVED_FULL_SHA>
+        with:
+          fetch-depth: 0
+
+      - name: Validate manifest exists
+        env:
+          MANIFEST_PATH: ${{ inputs.manifest_path }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! -f "${MANIFEST_PATH}" ]]; then
+            echo "::error::Components manifest does not exist: ${MANIFEST_PATH}"
+            exit 1
+          fi
+
+          if [[ ! -s "${MANIFEST_PATH}" ]]; then
+            echo "::error::Components manifest is empty: ${MANIFEST_PATH}"
+            exit 1
+          fi
+
+      - name: Checkout shared components tooling
+        uses: actions/checkout@<APPROVED_FULL_SHA>
+        with:
+          repository: poc-governanca/bdp-shared-github-workflows
+          ref: ${{ inputs.tooling_ref }}
+          path: ".shared-workflows"
+          fetch-depth: 1
+
+      - name: Validate shared tooling files
+        run: |
+          set -euo pipefail
+
+          REQUIRED_FILES=(
+            ".shared-workflows/scripts/components/validate-components.py"
+            ".shared-workflows/scripts/components/detect-changes.py"
+            ".shared-workflows/scripts/components/schemas/components.schema.json"
+          )
+
+          for FILE in "${REQUIRED_FILES[@]}"; do
+            if [[ ! -f "${FILE}" ]]; then
+              echo "::error::Required tooling file does not exist: ${FILE}"
+              exit 1
+            fi
+          done
+
+          python -m json.tool \
+            ".shared-workflows/scripts/components/schemas/components.schema.json" \
+            > /dev/null
+
+          python -m py_compile \
+            ".shared-workflows/scripts/components/validate-components.py" \
+            ".shared-workflows/scripts/components/detect-changes.py"
+
+      - name: Set up Python
+        uses: actions/setup-python@<APPROVED_FULL_SHA>
+        with:
+          python-version: "3.13"
+
+      - name: Install component tooling dependencies
+        run: |
+          set -euo pipefail
+
+          python -m pip install \
+            "PyYAML==<APPROVED_VERSION>" \
+            "jsonschema==<APPROVED_VERSION>"
+
+      - name: Validate components manifest
+        env:
+          MANIFEST_PATH: ${{ inputs.manifest_path }}
+        run: |
+          set -euo pipefail
+
+          python \
+            ".shared-workflows/scripts/components/validate-components.py" \
+            --manifest "${MANIFEST_PATH}" \
+            --schema \
+              ".shared-workflows/scripts/components/schemas/components.schema.json" \
+            --repository-root "."
+
+      - name: Resolve commit range
+        id: commits
+        env:
+          INPUT_BASE_SHA: ${{ inputs.base_sha }}
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+
+          EVENT_NAME: ${{ github.event_name }}
+          CURRENT_SHA: ${{ github.sha }}
+
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_AFTER_SHA: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+
+          ZERO_SHA="0000000000000000000000000000000000000000"
+
+          BASE_SHA="${INPUT_BASE_SHA}"
+          HEAD_SHA="${INPUT_HEAD_SHA}"
+          INITIAL_PUSH="false"
+
+          if [[ -z "${HEAD_SHA}" ]]; then
+            case "${EVENT_NAME}" in
+              pull_request|pull_request_target)
+                HEAD_SHA="${PR_HEAD_SHA}"
+                ;;
+
+              push)
+                HEAD_SHA="${PUSH_AFTER_SHA:-${CURRENT_SHA}}"
+                ;;
+
+              workflow_dispatch|schedule)
+                HEAD_SHA="${CURRENT_SHA}"
+                ;;
+
+              *)
+                HEAD_SHA="${CURRENT_SHA}"
+                ;;
+            esac
+          fi
+
+          if [[ -z "${BASE_SHA}" ]]; then
+            case "${EVENT_NAME}" in
+              pull_request|pull_request_target)
+                BASE_SHA="${PR_BASE_SHA}"
+                ;;
+
+              push)
+                BASE_SHA="${PUSH_BEFORE_SHA}"
+
+                if [[ "${BASE_SHA}" == "${ZERO_SHA}" ]]; then
+                  INITIAL_PUSH="true"
+                  BASE_SHA="${HEAD_SHA}"
+                fi
+                ;;
+
+              workflow_dispatch|schedule)
+                if git rev-parse "${HEAD_SHA}^" > /dev/null 2>&1; then
+                  BASE_SHA="$(
+                    git rev-parse "${HEAD_SHA}^"
+                  )"
+                else
+                  INITIAL_PUSH="true"
+                  BASE_SHA="${HEAD_SHA}"
+                fi
+                ;;
+
+              *)
+                echo "::error::Unable to automatically resolve the base SHA for event '${EVENT_NAME}'."
+                echo "::error::Provide base_sha and head_sha explicitly."
+                exit 1
+                ;;
+            esac
+          fi
+
+          if [[ ! "${BASE_SHA}" =~ ^[a-fA-F0-9]{40}$ ]]; then
+            echo "::error::Resolved base SHA is invalid: ${BASE_SHA}"
+            exit 1
+          fi
+
+          if [[ ! "${HEAD_SHA}" =~ ^[a-fA-F0-9]{40}$ ]]; then
+            echo "::error::Resolved head SHA is invalid: ${HEAD_SHA}"
+            exit 1
+          fi
+
+          if ! git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
+            echo "::error::Head commit is not available locally: ${HEAD_SHA}"
+            exit 1
+          fi
+
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            echo "::error::Base commit is not available locally: ${BASE_SHA}"
+            exit 1
+          fi
+
+          echo "base-sha=${BASE_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "head-sha=${HEAD_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "initial-push=${INITIAL_PUSH}" >> "${GITHUB_OUTPUT}"
+
+          echo "Event: ${EVENT_NAME}"
+          echo "Base SHA: ${BASE_SHA}"
+          echo "Head SHA: ${HEAD_SHA}"
+          echo "Initial push: ${INITIAL_PUSH}"
+
+      - name: Generate changed-files list
+        env:
+          BASE_SHA: ${{ steps.commits.outputs.base-sha }}
+          HEAD_SHA: ${{ steps.commits.outputs.head-sha }}
+          INITIAL_PUSH: ${{ steps.commits.outputs.initial-push }}
+          FORCE_FULL_FAN_OUT: ${{ inputs.force_full_fan_out }}
+          MANIFEST_PATH: ${{ inputs.manifest_path }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${FORCE_FULL_FAN_OUT}" == "true" ]]; then
+            printf '%s\n' \
+              ".github/components.yml" \
+              > "changed-files.txt"
+
+            echo "Full fan-out was explicitly requested."
+          elif [[ "${INITIAL_PUSH}" == "true" ]]; then
+            printf '%s\n' \
+              ".github/components.yml" \
+              > "changed-files.txt"
+
+            echo "Initial push detected."
+            echo "Full fan-out will be used."
+          else
+            git diff \
+              --name-only \
+              --diff-filter=ACMRDTUXB \
+              "${BASE_SHA}" \
+              "${HEAD_SHA}" \
+              > "changed-files.txt"
+          fi
+
+          sort \
+            --unique \
+            --output="changed-files.txt" \
+            "changed-files.txt"
+
+          echo
+          echo "Changed files:"
+
+          if [[ -s "changed-files.txt" ]]; then
+            cat "changed-files.txt"
+          else
+            echo "<none>"
+          fi
+
+          echo
+          echo "Changed file count: $(wc -l < changed-files.txt)"
+
+      - name: Validate changed-files list
+        run: |
+          set -euo pipefail
+
+          if [[ ! -f "changed-files.txt" ]]; then
+            echo "::error::changed-files.txt was not generated."
+            exit 1
+          fi
+
+          while IFS= read -r FILE; do
+            if [[ -z "${FILE}" ]]; then
+              continue
+            fi
+
+            if [[ "${FILE}" == /* ]]; then
+              echo "::error::Absolute changed path is not allowed: ${FILE}"
+              exit 1
+            fi
+
+            if [[ \
+              "${FILE}" == ".." \
+              || "${FILE}" == ../* \
+              || "${FILE}" == */../* \
+              || "${FILE}" == */.. \
+            ]]; then
+              echo "::error::Parent traversal found in changed path: ${FILE}"
+              exit 1
+            fi
+
+            if [[ "${FILE}" == *$'\n'* || "${FILE}" == *$'\r'* ]]; then
+              echo "::error::Invalid control character in changed path."
+              exit 1
+            fi
+          done < "changed-files.txt"
+
+      - name: Detect affected components
+        id: detect
+        env:
+          MANIFEST_PATH: ${{ inputs.manifest_path }}
+        run: |
+          set -euo pipefail
+
+          python \
+            ".shared-workflows/scripts/components/detect-changes.py" \
+            --manifest "${MANIFEST_PATH}" \
+            --changed-files "changed-files.txt" \
+            --output "affected-components.json" \
+            --github-output "${GITHUB_OUTPUT}"
+
+      - name: Validate detection result
+        run: |
+          set -euo pipefail
+
+          if [[ ! -s "affected-components.json" ]]; then
+            echo "::error::Change detection did not produce evidence."
+            exit 1
+          fi
+
+          python -m json.tool \
+            "affected-components.json" \
+            > /dev/null
+
+          python - <<'PY'
+          import json
+
+          with open(
+              "affected-components.json",
+              "r",
+              encoding="utf-8",
+          ) as file:
+              result = json.load(file)
+
+          if result.get("schema_version") != 1:
+              raise SystemExit(
+                  "Unsupported change-detection schema version."
+              )
+
+          matrix = result.get("matrix")
+
+          if not isinstance(matrix, dict):
+              raise SystemExit(
+                  "Change-detection result has no valid matrix."
+              )
+
+          include = matrix.get("include")
+
+          if not isinstance(include, list):
+              raise SystemExit(
+                  "Change-detection matrix.include must be an array."
+              )
+
+          required_matrix_fields = {
+              "name",
+              "type",
+              "path",
+              "language",
+              "tier",
+              "application_changed",
+              "build_enabled",
+              "build_profile",
+              "container_enabled",
+              "image_name",
+              "dockerfile",
+              "build_context",
+              "infrastructure_enabled",
+              "infrastructure_changed",
+              "infrastructure_paths",
+              "infrastructure_scan_path",
+          }
+
+          component_names = set()
+
+          for component in include:
+              if not isinstance(component, dict):
+                  raise SystemExit(
+                      "Every matrix entry must be an object."
+                  )
+
+              missing = (
+                  required_matrix_fields
+                  - set(component)
+              )
+
+              if missing:
+                  raise SystemExit(
+                      "Matrix entry is missing required fields: "
+                      + ", ".join(sorted(missing))
+                  )
+
+              name = component["name"]
+
+              if name in component_names:
+                  raise SystemExit(
+                      f"Duplicate component in matrix: {name}"
+                  )
+
+              component_names.add(name)
+
+              application_changed = component[
+                  "application_changed"
+              ]
+
+              infrastructure_changed = component[
+                  "infrastructure_changed"
+              ]
+
+              if not isinstance(
+                  application_changed,
+                  bool,
+              ):
+                  raise SystemExit(
+                      f"{name}: application_changed must be boolean."
+                  )
+
+              if not isinstance(
+                  infrastructure_changed,
+                  bool,
+              ):
+                  raise SystemExit(
+                      f"{name}: infrastructure_changed must be boolean."
+                  )
+
+              if (
+                  not application_changed
+                  and not infrastructure_changed
+              ):
+                  raise SystemExit(
+                      f"{name}: matrix entry has no applicable change."
+                  )
+
+          expected_count = result.get(
+              "affected_component_count"
+          )
+
+          if expected_count != len(include):
+              raise SystemExit(
+                  "affected_component_count does not match matrix size."
+              )
+
+          print(
+              "Change-detection evidence validation: PASS"
+          )
+          PY
+
+      - name: Generate change-detection metadata
+        env:
+          BASE_SHA: ${{ steps.commits.outputs.base-sha }}
+          HEAD_SHA: ${{ steps.commits.outputs.head-sha }}
+          INITIAL_PUSH: ${{ steps.commits.outputs.initial-push }}
+          FORCE_FULL_FAN_OUT: ${{ inputs.force_full_fan_out }}
+          MANIFEST_PATH: ${{ inputs.manifest_path }}
+          TOOLING_REF: ${{ inputs.tooling_ref }}
+
+          REPOSITORY: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW: ${{ github.workflow }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import json
+          import os
+
+          metadata = {
+              "schema_version": 1,
+              "repository": os.environ["REPOSITORY"],
+              "event_name": os.environ["EVENT_NAME"],
+              "workflow": os.environ["WORKFLOW"],
+              "base_sha": os.environ["BASE_SHA"],
+              "head_sha": os.environ["HEAD_SHA"],
+              "initial_push": (
+                  os.environ["INITIAL_PUSH"].lower()
+                  == "true"
+              ),
+              "force_full_fan_out": (
+                  os.environ["FORCE_FULL_FAN_OUT"].lower()
+                  == "true"
+              ),
+              "manifest_path": os.environ["MANIFEST_PATH"],
+              "tooling_ref": os.environ["TOOLING_REF"],
+              "run_id": os.environ["RUN_ID"],
+              "run_attempt": os.environ["RUN_ATTEMPT"],
+          }
+
+          with open(
+              "change-detection-metadata.json",
+              "w",
+              encoding="utf-8",
+          ) as file:
+              json.dump(
+                  metadata,
+                  file,
+                  indent=2,
+              )
+
+              file.write("\n")
+          PY
+
+      - name: Upload change-detection evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@<APPROVED_FULL_SHA>
+        with:
+          name: change-detection-evidence
+          retention-days: ${{ inputs.evidence_retention_days }}
+          if-no-files-found: error
+          path: |
+            changed-files.txt
+            affected-components.json
+            change-detection-metadata.json
+
+      - name: Generate change-detection summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo "## Repository Change Detection"
+            echo
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          if [[ -f "change-detection-metadata.json" ]]; then
+            python - <<'PY' >> "${GITHUB_STEP_SUMMARY}"
+          import json
+
+          with open(
+              "change-detection-metadata.json",
+              "r",
+              encoding="utf-8",
+          ) as file:
+              metadata = json.load(file)
+
+          print("| Property | Value |")
+          print("|---|---|")
+          print(
+              f"| Repository | "
+              f"`{metadata['repository']}` |"
+          )
+          print(
+              f"| Event | "
+              f"`{metadata['event_name']}` |"
+          )
+          print(
+              f"| Base SHA | "
+              f"`{metadata['base_sha']}` |"
+          )
+          print(
+              f"| Head SHA | "
+              f"`{metadata['head_sha']}` |"
+          )
+          print(
+              f"| Initial push | "
+              f"{metadata['initial_push']} |"
+          )
+          print(
+              f"| Forced fan-out | "
+              f"{metadata['force_full_fan_out']} |"
+          )
+          print(
+              f"| Manifest | "
+              f"`{metadata['manifest_path']}` |"
+          )
+          print(
+              f"| Tooling ref | "
+              f"`{metadata['tooling_ref']}` |"
+          )
+          print()
+          PY
+          fi
+
+          if [[ -f "affected-components.json" ]]; then
+            python - <<'PY' >> "${GITHUB_STEP_SUMMARY}"
+          import json
+
+          with open(
+              "affected-components.json",
+              "r",
+              encoding="utf-8",
+          ) as file:
+              result = json.load(file)
+
+          print("### Detection Result")
+          print()
+          print("| Property | Value |")
+          print("|---|---|")
+          print(
+              f"| Changed files | "
+              f"{len(result['changed_files'])} |"
+          )
+          print(
+              f"| Full fan-out | "
+              f"{result['full_fan_out']} |"
+          )
+          print(
+              f"| Affected components | "
+              f"{result['affected_component_count']} |"
+          )
+          print(
+              "| GitHub Actions affected | "
+              f"{result['repository_controls']['github_actions']['affected']} |"
+          )
+          print(
+              "| Repository IaC affected | "
+              f"{result['repository_controls']['infrastructure']['affected']} |"
+          )
+          print(
+              "| Repository IaC scan path | "
+              f"`{result['repository_controls']['infrastructure']['scan_path']}` |"
+          )
+          print()
+
+          matrix = result["matrix"]["include"]
+
+          if matrix:
+              print("### Affected Components")
+              print()
+              print(
+                  "| Component | Application | IaC | "
+                  "Language | Profile | Container | Tier |"
+              )
+              print(
+                  "|---|---:|---:|---|---|---:|---:|"
+              )
+
+              for component in matrix:
+                  print(
+                      f"| `{component['name']}` "
+                      f"| {component['application_changed']} "
+                      f"| {component['infrastructure_changed']} "
+                      f"| `{component['language']}` "
+                      f"| `{component['build_profile']}` "
+                      f"| {component['container_enabled']} "
+                      f"| {component['tier']} |"
+                  )
+          else:
+              print(
+                  "No application component was affected."
+              )
+
+          print()
+          print("### Reasons")
+          print()
+
+          affected_components = result[
+              "affected_components"
+          ]
+
+          if affected_components:
+              for name in affected_components:
+                  reasons = result[
+                      "component_details"
+                  ][name]["reasons"]
+
+                  formatted = ", ".join(
+                      f"`{reason}`"
+                      for reason in reasons
+                  )
+
+                  print(
+                      f"- **{name}**: {formatted}"
+                  )
+          else:
+              print(
+                  "No component-level reasons were recorded."
+              )
+          PY
+          fi

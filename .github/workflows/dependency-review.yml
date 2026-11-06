@@ -1,0 +1,56 @@
+name: Reusable Dependency Review
+
+on:
+  workflow_call:
+    inputs:
+      tier:
+        description: "Asset tier: 1, 2 or 3"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+
+  validate:
+    name: Validate Dependency Policy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate Tier
+        shell: bash
+        run: |
+          case "${{ inputs.tier }}" in
+            1|2|3)
+              echo "Valid asset tier: ${{ inputs.tier }}"
+              ;;
+            *)
+              echo "::error::Invalid asset tier '${{ inputs.tier }}'."
+              echo "::error::Allowed values are 1, 2 or 3."
+              exit 1
+              ;;
+          esac
+
+  dependency-review:
+    name: Dependency Review
+    needs:
+      - validate
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@<APPROVED_FULL_SHA> # approved version
+
+      - name: Dependency Review - Tier 1/2
+        if: ${{ inputs.tier == '1' || inputs.tier == '2' }}
+        uses: actions/dependency-review-action@<APPROVED_FULL_SHA> # approved version
+        with:
+          fail-on-severity: high
+
+      - name: Dependency Review - Tier 3
+        if: ${{ inputs.tier == '3' }}
+        uses: actions/dependency-review-action@<APPROVED_FULL_SHA> # approved version
+        with:
+          fail-on-severity: critical

@@ -1,0 +1,3 @@
+scripts/components/__pycache__/*
+scripts/components/tests/__pycache__/*
+scripts/security/__pycache__/*

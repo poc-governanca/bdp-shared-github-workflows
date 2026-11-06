@@ -1,0 +1,76 @@
+# ============================================================
+# DEFAULT OWNERSHIP
+# ============================================================
+
+* @org/platform-admins
+
+
+# ============================================================
+# GITHUB GOVERNANCE
+# ============================================================
+
+/.github/CODEOWNERS @org/platform-admins @org/security-reviewers
+
+
+# ============================================================
+# SECURITY WORKFLOWS
+# ============================================================
+
+/.github/workflows/security.yml \
+@org/platform-admins @org/security-reviewers
+
+/.github/workflows/dependency-review.yml \
+@org/platform-admins @org/security-reviewers
+
+/.github/workflows/container-security.yml \
+@org/platform-admins @org/security-reviewers
+
+/.github/workflows/terraform-security.yml \
+@org/platform-admins @org/security-reviewers
+
+/.github/actions/validate-trivy-exceptions/ @org/platform-admins @org/security-reviewers
+
+/scripts/security/ @org/platform-admins @org/security-reviewers
+
+/.github/workflows/iac-security.yml @org/platform-admins @org/security-reviewers
+
+/scripts/security/policies/ @org/platform-admins @org/security-reviewers
+
+/.github/workflows/container-build.yml @org/platform-admins @org/security-reviewers
+
+/.github/workflows/container-security.yml @org/platform-admins @org/security-reviewers
+
+/.github/workflows/container-promote.yml @org/platform-admins @org/security-reviewers
+
+/security/attestations/ @org/platform-admins @org/security-reviewers
+
+/.github/workflows/codeql-security.yml @org/platform-admins @org/security-reviewers
+
+/scripts/components/ @org/platform-admins @org/security-reviewers
+
+/.github/workflows/detect-changes.yml @org/platform-admins @org/security-reviewers
+
+
+# ============================================================
+# CI WORKFLOWS
+# ============================================================
+
+/.github/workflows/dotnet-ci.yml @org/platform-admins
+
+/.github/workflows/java-ci.yml @org/platform-admins
+
+/.github/workflows/node-ci.yml @org/platform-admins
+
+/.github/workflows/python-ci.yml @org/platform-admins
+
+/.github/workflows/terraform-ci.yml @org/platform-admins
+
+/.github/workflows/dotnet-ci.yml @org/platform-admins @org/security-reviewers
+
+
+# ============================================================
+# DEPLOYMENT
+# ============================================================
+
+/.github/workflows/deploy.yml \
+@org/platform-admins @org/security-reviewers

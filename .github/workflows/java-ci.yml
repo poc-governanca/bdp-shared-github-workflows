@@ -1,0 +1,664 @@
+name: Reusable Java Component CI
+
+on:
+  workflow_call:
+    inputs:
+      component_name:
+        description: "Component name from components.yml"
+        required: true
+        type: string
+
+      component_path:
+        description: "Repository-relative component directory"
+        required: true
+        type: string
+
+      tier:
+        description: "Component Tier: 1, 2 or 3"
+        required: true
+        type: number
+
+      java_version:
+        description: "Java version"
+        required: false
+        type: string
+        default: "21"
+
+      java_distribution:
+        description: "Java distribution"
+        required: false
+        type: string
+        default: "temurin"
+
+      require_tests:
+        description: "Require Maven test result evidence"
+        required: false
+        type: boolean
+        default: true
+
+      collect_coverage:
+        description: "Require JaCoCo XML coverage evidence"
+        required: false
+        type: boolean
+        default: false
+
+      evidence_retention_days:
+        description: "Evidence artifact retention period"
+        required: false
+        type: number
+        default: 30
+
+    outputs:
+      result:
+        description: "Technology CI result"
+        value: ${{ jobs.java-ci.outputs.result }}
+
+      java_version:
+        description: "Resolved Java version"
+        value: ${{ jobs.java-ci.outputs.java-version }}
+
+      maven_version:
+        description: "Maven Wrapper version"
+        value: ${{ jobs.java-ci.outputs.maven-version }}
+
+      artifact_name:
+        description: "Java build artifact name"
+        value: ${{ jobs.java-ci.outputs.artifact-name }}
+
+permissions:
+  contents: read
+
+jobs:
+  java-ci:
+    name: "${{ inputs.component_name }} / Java CI"
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    outputs:
+      result: ${{ steps.outputs.outputs.result }}
+      java-version: ${{ steps.runtime.outputs.java-version }}
+      maven-version: ${{ steps.runtime.outputs.maven-version }}
+      artifact-name: ${{ steps.outputs.outputs.artifact-name }}
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      COMPONENT_NAME: ${{ inputs.component_name }}
+      COMPONENT_PATH: ${{ inputs.component_path }}
+
+      POM_FILE: ${{ inputs.component_path }}/pom.xml
+      MAVEN_WRAPPER: ${{ inputs.component_path }}/mvnw
+      MAVEN_WRAPPER_PROPERTIES: ${{ inputs.component_path }}/.mvn/wrapper/maven-wrapper.properties
+
+      RESULTS_DIRECTORY: ${{ github.workspace }}/.ci-results/java
+      TEST_RESULTS_DIRECTORY: ${{ github.workspace }}/.ci-results/java/tests
+      COVERAGE_DIRECTORY: ${{ github.workspace }}/.ci-results/java/coverage
+      BUILD_DIRECTORY: ${{ github.workspace }}/.ci-results/java/build
+
+      MAVEN_OPTS: "-Djava.awt.headless=true"
+
+    steps:
+      - name: Validate Java CI inputs
+        env:
+          TIER: ${{ inputs.tier }}
+          JAVA_VERSION: ${{ inputs.java_version }}
+          JAVA_DISTRIBUTION: ${{ inputs.java_distribution }}
+          RETENTION_DAYS: ${{ inputs.evidence_retention_days }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${COMPONENT_NAME}" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+            echo "::error::Invalid component_name '${COMPONENT_NAME}'."
+            exit 1
+          fi
+
+          if [[ -z "${COMPONENT_PATH}" ]]; then
+            echo "::error::component_path cannot be empty."
+            exit 1
+          fi
+
+          if [[ "${COMPONENT_PATH}" == /* ]]; then
+            echo "::error::component_path must be repository-relative."
+            exit 1
+          fi
+
+          if [[ "${COMPONENT_PATH}" == *".."* ]]; then
+            echo "::error::Parent traversal is not allowed in component_path."
+            exit 1
+          fi
+
+          case "${TIER}" in
+            1|2|3)
+              ;;
+            *)
+              echo "::error::Invalid Tier '${TIER}'."
+              exit 1
+              ;;
+          esac
+
+          if [[ ! "${JAVA_VERSION}" =~ ^[0-9]+([.][0-9]+){0,2}$ ]]; then
+            echo "::error::Invalid java_version '${JAVA_VERSION}'."
+            exit 1
+          fi
+
+          if [[ "${JAVA_DISTRIBUTION}" != "temurin" ]]; then
+            echo "::error::Unsupported Java distribution '${JAVA_DISTRIBUTION}'."
+            echo "::error::Current baseline supports only temurin."
+            exit 1
+          fi
+
+          if ! [[ "${RETENTION_DAYS}" =~ ^[0-9]+$ ]]; then
+            echo "::error::evidence_retention_days must be numeric."
+            exit 1
+          fi
+
+          if [[ "${RETENTION_DAYS}" -lt 1 || "${RETENTION_DAYS}" -gt 90 ]]; then
+            echo "::error::evidence_retention_days must be between 1 and 90."
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@<APPROVED_FULL_SHA>
+        with:
+          fetch-depth: 0
+
+      - name: Validate Java component structure
+        run: |
+          set -euo pipefail
+
+          if [[ ! -d "${COMPONENT_PATH}" ]]; then
+            echo "::error::Component directory does not exist: ${COMPONENT_PATH}"
+            exit 1
+          fi
+
+          if [[ ! -f "${POM_FILE}" ]]; then
+            echo "::error::pom.xml is required: ${POM_FILE}"
+            exit 1
+          fi
+
+          if [[ ! -f "${MAVEN_WRAPPER}" ]]; then
+            echo "::error::Maven Wrapper is required: ${MAVEN_WRAPPER}"
+            exit 1
+          fi
+
+          if [[ ! -f "${MAVEN_WRAPPER_PROPERTIES}" ]]; then
+            echo "::error::Maven Wrapper properties are required: ${MAVEN_WRAPPER_PROPERTIES}"
+            exit 1
+          fi
+
+          if [[ -f "${COMPONENT_PATH}/build.gradle" ]]; then
+            echo "::error::Gradle is not supported by the current Java baseline."
+            exit 1
+          fi
+
+          if [[ -f "${COMPONENT_PATH}/build.gradle.kts" ]]; then
+            echo "::error::Gradle is not supported by the current Java baseline."
+            exit 1
+          fi
+
+          if [[ -f "${COMPONENT_PATH}/gradlew" ]]; then
+            echo "::error::Gradle Wrapper is not supported by the current Java baseline."
+            exit 1
+          fi
+
+      - name: Validate Maven Wrapper configuration
+        run: |
+          set -euo pipefail
+
+          python - "${MAVEN_WRAPPER_PROPERTIES}" <<'PY'
+          import sys
+          from pathlib import Path
+          from urllib.parse import urlparse
+
+          path = Path(sys.argv[1])
+
+          properties = {}
+
+          for raw_line in path.read_text(
+              encoding="utf-8"
+          ).splitlines():
+              line = raw_line.strip()
+
+              if not line or line.startswith("#"):
+                  continue
+
+              if "=" not in line:
+                  continue
+
+              key, value = line.split("=", 1)
+              properties[key.strip()] = value.strip()
+
+          distribution_url = properties.get(
+              "distributionUrl",
+              "",
+          )
+
+          if not distribution_url:
+              raise SystemExit(
+                  "maven-wrapper.properties must define distributionUrl."
+              )
+
+          parsed = urlparse(
+              distribution_url
+          )
+
+          if parsed.scheme != "https":
+              raise SystemExit(
+                  "Maven Wrapper distributionUrl must use HTTPS."
+              )
+
+          allowed_hosts = {
+              "repo.maven.apache.org",
+              "archive.apache.org",
+          }
+
+          if parsed.hostname not in allowed_hosts:
+              raise SystemExit(
+                  "Maven Wrapper distributionUrl uses an "
+                  f"unapproved host: {parsed.hostname}"
+              )
+
+          if not parsed.path.endswith(
+              "-bin.zip"
+          ):
+              raise SystemExit(
+                  "Maven Wrapper distributionUrl must reference "
+                  "a Maven binary ZIP distribution."
+              )
+
+          print(
+              f"Maven Wrapper distribution: {distribution_url}"
+          )
+          PY
+
+      - name: Make Maven Wrapper executable
+        run: |
+          set -euo pipefail
+
+          chmod +x "${MAVEN_WRAPPER}"
+
+          if [[ ! -x "${MAVEN_WRAPPER}" ]]; then
+            echo "::error::Unable to make Maven Wrapper executable."
+            exit 1
+          fi
+
+      - name: Set up Java
+        uses: actions/setup-java@<APPROVED_FULL_SHA>
+        with:
+          distribution: ${{ inputs.java_distribution }}
+          java-version: ${{ inputs.java_version }}
+          cache: "maven"
+          cache-dependency-path: ${{ inputs.component_path }}/pom.xml
+
+      - name: Resolve Java and Maven versions
+        id: runtime
+        working-directory: ${{ inputs.component_path }}
+        run: |
+          set -euo pipefail
+
+          echo "Java runtime:"
+          java -version
+
+          JAVA_VERSION="$(
+            java \
+              -XshowSettings:properties \
+              -version \
+              2>&1 \
+              | awk -F'= ' \
+                  '/^[[:space:]]*java.version = / {
+                    print $2;
+                    exit
+                  }'
+          )"
+
+          if [[ -z "${JAVA_VERSION}" ]]; then
+            echo "::error::Unable to determine the Java version."
+            exit 1
+          fi
+
+          echo
+          echo "Maven Wrapper:"
+
+          MAVEN_OUTPUT="$(
+            ./mvnw --version
+          )"
+
+          printf '%s\n' "${MAVEN_OUTPUT}"
+
+          MAVEN_VERSION="$(
+            printf '%s\n' "${MAVEN_OUTPUT}" \
+              | awk \
+                  '/^Apache Maven / {
+                    print $3;
+                    exit
+                  }'
+          )"
+
+          if [[ -z "${MAVEN_VERSION}" ]]; then
+            echo "::error::Unable to determine the Maven Wrapper version."
+            exit 1
+          fi
+
+          echo "java-version=${JAVA_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "maven-version=${MAVEN_VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Prepare evidence directories
+        run: |
+          set -euo pipefail
+
+          mkdir -p \
+            "${RESULTS_DIRECTORY}" \
+            "${TEST_RESULTS_DIRECTORY}" \
+            "${COVERAGE_DIRECTORY}" \
+            "${BUILD_DIRECTORY}"
+
+      - name: Validate Maven project
+        working-directory: ${{ inputs.component_path }}
+        run: |
+          set -euo pipefail
+
+          ./mvnw \
+            --batch-mode \
+            --no-transfer-progress \
+            help:effective-pom \
+            -Doutput="${RESULTS_DIRECTORY}/effective-pom.xml"
+
+          if [[ ! -s "${RESULTS_DIRECTORY}/effective-pom.xml" ]]; then
+            echo "::error::Maven did not generate an effective POM."
+            exit 1
+          fi
+
+      - name: Verify Java component
+        working-directory: ${{ inputs.component_path }}
+        run: |
+          set -euo pipefail
+
+          ./mvnw \
+            --batch-mode \
+            --no-transfer-progress \
+            verify
+
+      - name: Collect Surefire reports
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t DIRECTORIES < <(
+            find "${COMPONENT_PATH}" \
+              -type d \
+              -path "*/target/surefire-reports" \
+              | sort
+          )
+
+          INDEX=0
+
+          for DIRECTORY in "${DIRECTORIES[@]}"; do
+            TARGET="${TEST_RESULTS_DIRECTORY}/surefire-${INDEX}"
+
+            mkdir -p "${TARGET}"
+
+            cp -R \
+              "${DIRECTORY}/." \
+              "${TARGET}/"
+
+            INDEX="$((INDEX + 1))"
+          done
+
+          echo "Surefire report directories: ${#DIRECTORIES[@]}"
+
+      - name: Collect Failsafe reports
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t DIRECTORIES < <(
+            find "${COMPONENT_PATH}" \
+              -type d \
+              -path "*/target/failsafe-reports" \
+              | sort
+          )
+
+          INDEX=0
+
+          for DIRECTORY in "${DIRECTORIES[@]}"; do
+            TARGET="${TEST_RESULTS_DIRECTORY}/failsafe-${INDEX}"
+
+            mkdir -p "${TARGET}"
+
+            cp -R \
+              "${DIRECTORY}/." \
+              "${TARGET}/"
+
+            INDEX="$((INDEX + 1))"
+          done
+
+          echo "Failsafe report directories: ${#DIRECTORIES[@]}"
+
+      - name: Validate test evidence
+        if: ${{ inputs.require_tests }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t TEST_REPORTS < <(
+            find "${TEST_RESULTS_DIRECTORY}" \
+              -type f \
+              \( \
+                -name "TEST-*.xml" \
+                -o -name "failsafe-summary.xml" \
+              \) \
+              | sort
+          )
+
+          if [[ "${#TEST_REPORTS[@]}" -eq 0 ]]; then
+            echo "::error::Tests are required, but no Maven XML test reports were found."
+            echo "::error::Ensure Surefire or Failsafe executes tests during verify."
+            exit 1
+          fi
+
+          echo "Maven test report files: ${#TEST_REPORTS[@]}"
+
+      - name: Collect JaCoCo coverage
+        if: ${{ always() && inputs.collect_coverage }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t COVERAGE_FILES < <(
+            find "${COMPONENT_PATH}" \
+              -type f \
+              -path "*/target/site/jacoco/jacoco.xml" \
+              | sort
+          )
+
+          if [[ "${#COVERAGE_FILES[@]}" -eq 0 ]]; then
+            echo "::error::Coverage is required, but no JaCoCo XML report was found."
+            echo "::error::Configure jacoco-maven-plugin to generate jacoco.xml."
+            exit 1
+          fi
+
+          for INDEX in "${!COVERAGE_FILES[@]}"; do
+            cp \
+              "${COVERAGE_FILES[${INDEX}]}" \
+              "${COVERAGE_DIRECTORY}/jacoco-${INDEX}.xml"
+          done
+
+          echo "JaCoCo reports: ${#COVERAGE_FILES[@]}"
+
+      - name: Collect Java build artifacts
+        run: |
+          set -euo pipefail
+
+          mapfile -t ARTIFACTS < <(
+            find "${COMPONENT_PATH}" \
+              -type f \
+              \( \
+                -path "*/target/*.jar" \
+                -o -path "*/target/*.war" \
+              \) \
+              ! -name "*-sources.jar" \
+              ! -name "*-javadoc.jar" \
+              ! -name "original-*.jar" \
+              | sort
+          )
+
+          if [[ "${#ARTIFACTS[@]}" -eq 0 ]]; then
+            echo "::error::Maven verify completed, but no JAR or WAR artifact was found."
+            exit 1
+          fi
+
+          for INDEX in "${!ARTIFACTS[@]}"; do
+            ARTIFACT="${ARTIFACTS[${INDEX}]}"
+            FILE_NAME="$(basename "${ARTIFACT}")"
+
+            cp \
+              "${ARTIFACT}" \
+              "${BUILD_DIRECTORY}/${INDEX}-${FILE_NAME}"
+          done
+
+          echo "Java build artifacts: ${#ARTIFACTS[@]}"
+
+      - name: Generate Java CI metadata
+        if: ${{ always() }}
+        env:
+          TIER: ${{ inputs.tier }}
+          REQUESTED_JAVA_VERSION: ${{ inputs.java_version }}
+          JAVA_VERSION: ${{ steps.runtime.outputs.java-version }}
+          MAVEN_VERSION: ${{ steps.runtime.outputs.maven-version }}
+          JAVA_DISTRIBUTION: ${{ inputs.java_distribution }}
+          REQUIRE_TESTS: ${{ inputs.require_tests }}
+          COLLECT_COVERAGE: ${{ inputs.collect_coverage }}
+          REPOSITORY: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          metadata = {
+              "schema_version": 1,
+              "repository": os.environ["REPOSITORY"],
+              "commit_sha": os.environ["COMMIT_SHA"],
+              "component": {
+                  "name": os.environ["COMPONENT_NAME"],
+                  "path": os.environ["COMPONENT_PATH"],
+                  "tier": int(os.environ["TIER"]),
+              },
+              "java": {
+                  "requested_version": (
+                      os.environ["REQUESTED_JAVA_VERSION"]
+                  ),
+                  "resolved_version": (
+                      os.environ["JAVA_VERSION"]
+                  ),
+                  "distribution": (
+                      os.environ["JAVA_DISTRIBUTION"]
+                  ),
+                  "build_system": "maven-wrapper",
+                  "maven_version": (
+                      os.environ["MAVEN_VERSION"]
+                  ),
+                  "command": (
+                      "./mvnw --batch-mode "
+                      "--no-transfer-progress verify"
+                  ),
+                  "require_tests": (
+                      os.environ["REQUIRE_TESTS"].lower()
+                      == "true"
+                  ),
+                  "collect_coverage": (
+                      os.environ["COLLECT_COVERAGE"].lower()
+                      == "true"
+                  ),
+              },
+              "workflow": {
+                  "run_id": os.environ["RUN_ID"],
+                  "run_attempt": os.environ["RUN_ATTEMPT"],
+                  "job_status": os.environ["JOB_STATUS"],
+              },
+          }
+
+          output = (
+              Path(os.environ["RESULTS_DIRECTORY"])
+              / "java-ci-metadata.json"
+          )
+
+          output.write_text(
+              json.dumps(
+                  metadata,
+                  indent=2,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload Java CI evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@<APPROVED_FULL_SHA>
+        with:
+          name: ${{ inputs.component_name }}-java-ci-evidence
+          retention-days: ${{ inputs.evidence_retention_days }}
+          if-no-files-found: warn
+          path: |
+            .ci-results/java/java-ci-metadata.json
+            .ci-results/java/effective-pom.xml
+            .ci-results/java/tests/**
+            .ci-results/java/coverage/**
+
+      - name: Upload Java build artifacts
+        if: ${{ success() }}
+        uses: actions/upload-artifact@<APPROVED_FULL_SHA>
+        with:
+          name: ${{ inputs.component_name }}-java-build
+          retention-days: ${{ inputs.evidence_retention_days }}
+          if-no-files-found: error
+          path: |
+            .ci-results/java/build/**
+
+      - name: Expose Java CI outputs
+        id: outputs
+        if: ${{ success() }}
+        env:
+          ARTIFACT_NAME: ${{ inputs.component_name }}-java-build
+        run: |
+          set -euo pipefail
+
+          echo "result=PASS" >> "${GITHUB_OUTPUT}"
+          echo "artifact-name=${ARTIFACT_NAME}" >> "${GITHUB_OUTPUT}"
+
+      - name: Generate Java CI summary
+        if: ${{ always() }}
+        env:
+          TIER: ${{ inputs.tier }}
+          JAVA_VERSION: ${{ steps.runtime.outputs.java-version }}
+          MAVEN_VERSION: ${{ steps.runtime.outputs.maven-version }}
+          JAVA_DISTRIBUTION: ${{ inputs.java_distribution }}
+          REQUIRE_TESTS: ${{ inputs.require_tests }}
+          COLLECT_COVERAGE: ${{ inputs.collect_coverage }}
+        run: |
+          {
+            echo "## Java Component CI"
+            echo
+            echo "| Configuration | Value |"
+            echo "|---|---|"
+            echo "| Component | \`${COMPONENT_NAME}\` |"
+            echo "| Component path | \`${COMPONENT_PATH}\` |"
+            echo "| Tier | ${TIER} |"
+            echo "| Java | \`${JAVA_VERSION}\` |"
+            echo "| Distribution | \`${JAVA_DISTRIBUTION}\` |"
+            echo "| Maven | \`${MAVEN_VERSION}\` |"
+            echo "| Maven Wrapper | Required |"
+            echo "| Build command | \`./mvnw verify\` |"
+            echo "| Tests required | ${REQUIRE_TESTS} |"
+            echo "| JaCoCo required | ${COLLECT_COVERAGE} |"
+          } >> "${GITHUB_STEP_SUMMARY}"

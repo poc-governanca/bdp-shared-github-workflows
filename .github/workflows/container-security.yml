@@ -1,0 +1,376 @@
+name: Reusable Container Security
+
+on:
+  workflow_call:
+    inputs:
+      tier:
+        description: "Asset Tier: 1, 2 or 3"
+        required: true
+        type: string
+
+      image_ref:
+        description: "Container image reference to scan"
+        required: true
+        type: string
+
+      tooling_ref:
+        description: >
+          Version or commit SHA of the shared security tooling.
+        required: false
+        type: string
+        default: "v1"
+
+      evidence_retention_days:
+        description: "Security evidence retention period"
+        required: false
+        type: number
+        default: 30
+
+permissions:
+  contents: read
+
+jobs:
+  container-security:
+    name: Container Security
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      # =======================================================
+      # Configuration validation
+      # =======================================================
+
+      - name: Validate asset Tier
+        shell: bash
+        env:
+          TIER: ${{ inputs.tier }}
+        run: |
+          case "${TIER}" in
+            1|2|3)
+              echo "Valid asset Tier: ${TIER}"
+              ;;
+            *)
+              echo "::error::Invalid asset Tier '${TIER}'."
+              echo "::error::Allowed values: 1, 2 or 3."
+              exit 1
+              ;;
+          esac
+
+      - name: Validate image reference
+        shell: bash
+        env:
+          IMAGE_REF: ${{ inputs.image_ref }}
+        run: |
+          if [[ -z "${IMAGE_REF}" ]]; then
+            echo "::error::image_ref cannot be empty."
+            exit 1
+          fi
+
+          if [[ "${IMAGE_REF}" == *"*"* || "${IMAGE_REF}" == *"?"* ]]; then
+            echo "::error::Wildcards are not permitted in image_ref."
+            exit 1
+          fi
+
+          echo "Container image: ${IMAGE_REF}"
+
+      - name: Validate evidence retention
+        shell: bash
+        env:
+          RETENTION_DAYS: ${{ inputs.evidence_retention_days }}
+        run: |
+          if ! [[ "${RETENTION_DAYS}" =~ ^[0-9]+$ ]]; then
+            echo "::error::evidence_retention_days must be numeric."
+            exit 1
+          fi
+
+          if [[ "${RETENTION_DAYS}" -lt 1 || "${RETENTION_DAYS}" -gt 90 ]]; then
+            echo "::error::evidence_retention_days must be between 1 and 90."
+            exit 1
+          fi
+
+      # =======================================================
+      # Application repository
+      # =======================================================
+
+      - name: Checkout application repository
+        uses: actions/checkout@<APPROVED_FULL_SHA> # approved version
+        with:
+          fetch-depth: 0
+
+      # =======================================================
+      # Shared security tooling
+      # =======================================================
+
+      - name: Checkout shared security tooling
+        uses: actions/checkout@<APPROVED_FULL_SHA> # approved version
+        with:
+          repository: poc-governanca/bdp-shared-github-workflows
+          ref: ${{ inputs.tooling_ref }}
+          path: ".shared-workflows"
+
+      - name: Validate governed Trivy exceptions
+        uses: ./.shared-workflows/.github/actions/validate-trivy-exceptions
+        with:
+          exceptions-file: ".security/trivy-ignore.yaml"
+          tooling-root: ".shared-workflows"
+
+      # =======================================================
+      # Image availability
+      # =======================================================
+
+      - name: Verify container image availability
+        shell: bash
+        env:
+          IMAGE_REF: ${{ inputs.image_ref }}
+        run: |
+          if docker image inspect "${IMAGE_REF}" > /dev/null 2>&1; then
+            echo "Image is available in the local Docker daemon."
+            exit 0
+          fi
+
+          echo "Image was not found locally."
+          echo "Attempting to pull ${IMAGE_REF}."
+
+          if ! docker pull "${IMAGE_REF}"; then
+            echo "::error::Unable to inspect or pull image '${IMAGE_REF}'."
+            echo "::error::The technology workflow must build the image locally or publish it to an accessible registry."
+            exit 1
+          fi
+
+      # =======================================================
+      # Raw Trivy JSON
+      # =======================================================
+
+      - name: Run Trivy container JSON scan
+        uses: aquasecurity/trivy-action@<APPROVED_FULL_SHA> # approved version
+        with:
+          scan-type: "image"
+          image-ref: ${{ inputs.image_ref }}
+          scanners: "vuln"
+          format: "json"
+          output: "trivy-container-results.json"
+          severity: "UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL"
+          ignore-unfixed: false
+          exit-code: "0"
+
+      - name: Validate Trivy JSON output
+        shell: bash
+        run: |
+          if [[ ! -s "trivy-container-results.json" ]]; then
+            echo "::error::Trivy did not produce a container JSON result."
+            exit 1
+          fi
+
+          python -m json.tool \
+            "trivy-container-results.json" \
+            > /dev/null
+
+      # =======================================================
+      # Policy engine
+      # =======================================================
+
+      - name: Install evaluator dependencies
+        shell: bash
+        run: |
+          python -m pip install \
+            "PyYAML==<APPROVED_VERSION>" \
+            "jsonschema==<APPROVED_VERSION>"
+
+      - name: Evaluate effective container findings
+        id: evaluate
+        shell: bash
+        env:
+          TIER: ${{ inputs.tier }}
+          IMAGE_REF: ${{ inputs.image_ref }}
+        run: |
+          set +e
+
+          python \
+            ".shared-workflows/scripts/security/evaluate-trivy-container.py" \
+            --results "trivy-container-results.json" \
+            --exceptions ".security/trivy-ignore.yaml" \
+            --package-types-policy \
+              ".shared-workflows/scripts/security/policies/trivy-package-types.yaml" \
+            --tier "${TIER}" \
+            --image-ref "${IMAGE_REF}" \
+            --output "effective-container-results.json"
+
+          EVALUATION_EXIT_CODE="$?"
+
+          set -e
+
+          echo "exit-code=${EVALUATION_EXIT_CODE}" \
+            >> "${GITHUB_OUTPUT}"
+
+          case "${EVALUATION_EXIT_CODE}" in
+            0)
+              echo "result=PASS" >> "${GITHUB_OUTPUT}"
+              ;;
+
+            1)
+              echo "result=FAIL" >> "${GITHUB_OUTPUT}"
+              ;;
+
+            2)
+              echo "result=ERROR" >> "${GITHUB_OUTPUT}"
+              ;;
+
+            *)
+              echo "result=ERROR" >> "${GITHUB_OUTPUT}"
+
+              echo "::error::Unexpected container evaluator exit code: ${EVALUATION_EXIT_CODE}"
+
+              exit 2
+              ;;
+          esac
+
+      # =======================================================
+      # SARIF evidence
+      # =======================================================
+
+      - name: Run Trivy container SARIF scan
+        if: ${{ always() }}
+
+        uses: aquasecurity/trivy-action@<APPROVED_FULL_SHA> # approved version
+
+        with:
+          scan-type: "image"
+          image-ref: ${{ inputs.image_ref }}
+          scanners: "vuln"
+          format: "sarif"
+          output: "trivy-container-results.sarif"
+          severity: "UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL"
+          ignore-unfixed: false
+          exit-code: "0"
+
+      - name: Upload Trivy container SARIF
+        if: >-
+          ${{
+            always()
+            && hashFiles('trivy-container-results.sarif') != ''
+          }}
+
+        uses: github/codeql-action/upload-sarif@<APPROVED_FULL_SHA> # approved version
+
+        with:
+          sarif_file: "trivy-container-results.sarif"
+          category: "trivy-container"
+
+      # =======================================================
+      # Security evidence
+      # =======================================================
+
+      - name: Upload container security evidence
+        if: ${{ always() }}
+
+        uses: actions/upload-artifact@<APPROVED_FULL_SHA> # approved version
+
+        with:
+          name: "container-security-evidence"
+          retention-days: ${{ inputs.evidence_retention_days }}
+
+          path: |
+            trivy-container-results.json
+            trivy-container-results.sarif
+            effective-container-results.json
+
+          if-no-files-found: error
+
+      # =======================================================
+      # Job summary
+      # =======================================================
+
+      - name: Generate Container Security summary
+        if: ${{ always() }}
+
+        shell: bash
+        env:
+          TIER: ${{ inputs.tier }}
+          IMAGE_REF: ${{ inputs.image_ref }}
+          EVALUATION_RESULT: ${{ steps.evaluate.outputs.result }}
+        run: |
+          {
+            echo "## Container Security"
+            echo
+            echo "| Configuration | Value |"
+            echo "|---|---|"
+            echo "| Asset Tier | ${TIER} |"
+            echo "| Image | \`${IMAGE_REF}\` |"
+            echo "| Scanner | Trivy |"
+            echo "| Scanners | Vulnerabilities |"
+            echo "| Unfixed findings | Included |"
+            echo "| Exceptions | Governed by \`.security/trivy-ignore.yaml\` |"
+            echo "| Result | ${EVALUATION_RESULT:-ERROR} |"
+            echo
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          if [[ -f "effective-container-results.json" ]]; then
+            python - <<'PY' >> "${GITHUB_STEP_SUMMARY}"
+          import json
+
+          with open(
+              "effective-container-results.json",
+              "r",
+              encoding="utf-8",
+          ) as file:
+              result = json.load(file)
+
+          summary = result["summary"]
+          active = summary["active"]
+
+          print("| Finding status | Count |")
+          print("|---|---:|")
+          print(f"| Critical active | {active['critical']} |")
+          print(f"| High active | {active['high']} |")
+          print(f"| Medium active | {active['medium']} |")
+          print(f"| Low active | {active['low']} |")
+          print(f"| Unknown active | {active['unknown']} |")
+          print(f"| Exempted | {summary['exempted']} |")
+          print(
+              "| Stale exceptions | "
+              f"{summary['stale_exceptions']} |"
+          )
+          print(
+              "| Blocking findings | "
+              f"{summary['blocking_findings']} |"
+          )
+          print()
+          print(f"**Security Gate:** {result['gate']}")
+          PY
+          fi
+
+      # =======================================================
+      # Final enforcement
+      # =======================================================
+
+      - name: Enforce Container Security Gate
+        if: ${{ always() }}
+
+        shell: bash
+        env:
+          RESULT: ${{ steps.evaluate.outputs.result }}
+        run: |
+          case "${RESULT}" in
+            PASS)
+              echo "Container Security Gate: PASS"
+              ;;
+
+            FAIL)
+              echo "::error::Container Security Gate failed because active blocking vulnerabilities exist."
+              exit 1
+              ;;
+
+            ERROR|"")
+              echo "::error::Container Security Gate failed because container evaluation could not be completed safely."
+              exit 1
+              ;;
+
+            *)
+              echo "::error::Unknown Container Security Gate result: ${RESULT}"
+              exit 1
+              ;;
+          esac

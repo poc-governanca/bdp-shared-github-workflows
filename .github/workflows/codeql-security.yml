@@ -1,0 +1,227 @@
+name: Reusable CodeQL Security
+
+on:
+  workflow_call:
+    inputs:
+
+      component_name:
+        description: "Component name"
+        required: true
+        type: string
+
+      component_path:
+        description: "Repository-relative component path"
+        required: true
+        type: string
+
+      language:
+        description: "Component language"
+        required: true
+        type: string
+
+      query_suite:
+        description: "CodeQL query suite"
+        required: false
+        type: string
+        default: "security-extended"
+
+permissions:
+  contents: read
+
+jobs:
+
+  codeql:
+    name: "${{ inputs.component_name }} / CodeQL"
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+
+      # =======================================================
+      # Validate input
+      # =======================================================
+
+      - name: Validate CodeQL configuration
+        shell: bash
+        env:
+          COMPONENT_NAME: ${{ inputs.component_name }}
+          COMPONENT_PATH: ${{ inputs.component_path }}
+          LANGUAGE: ${{ inputs.language }}
+          QUERY_SUITE: ${{ inputs.query_suite }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${COMPONENT_NAME}" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+            echo "::error::Invalid component_name '${COMPONENT_NAME}'."
+            exit 1
+          fi
+
+          if [[ -z "${COMPONENT_PATH}" ]]; then
+            echo "::error::component_path cannot be empty."
+            exit 1
+          fi
+
+          if [[ "${COMPONENT_PATH}" == /* ]]; then
+            echo "::error::component_path must be repository-relative."
+            exit 1
+          fi
+
+          if [[ "${COMPONENT_PATH}" == *".."* ]]; then
+            echo "::error::Parent traversal is not permitted in component_path."
+            exit 1
+          fi
+
+          case "${LANGUAGE}" in
+            dotnet|java|node|javascript|typescript|python|go|actions)
+              ;;
+            *)
+              echo "::error::Unsupported CodeQL language '${LANGUAGE}'."
+              exit 1
+              ;;
+          esac
+
+          case "${QUERY_SUITE}" in
+            default|security-extended)
+              ;;
+            *)
+              echo "::error::Unsupported CodeQL query suite '${QUERY_SUITE}'."
+              exit 1
+              ;;
+          esac
+
+      # =======================================================
+      # Checkout
+      # =======================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@<APPROVED_FULL_SHA>
+        with:
+          fetch-depth: 0
+
+      - name: Validate component path
+        if: ${{ inputs.language != 'actions' }}
+        shell: bash
+        env:
+          COMPONENT_PATH: ${{ inputs.component_path }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! -d "${COMPONENT_PATH}" ]]; then
+            echo "::error::Component path does not exist: ${COMPONENT_PATH}"
+            exit 1
+          fi
+
+      # =======================================================
+      # CodeQL mapping
+      # =======================================================
+
+      - name: Resolve CodeQL configuration
+        id: config
+        shell: bash
+        env:
+          LANGUAGE: ${{ inputs.language }}
+        run: |
+          set -euo pipefail
+
+          case "${LANGUAGE}" in
+
+            dotnet)
+              CODEQL_LANGUAGE="csharp"
+              BUILD_MODE="none"
+              ;;
+
+            java)
+              CODEQL_LANGUAGE="java-kotlin"
+              BUILD_MODE="none"
+              ;;
+
+            node|javascript|typescript)
+              CODEQL_LANGUAGE="javascript-typescript"
+              BUILD_MODE="none"
+              ;;
+
+            python)
+              CODEQL_LANGUAGE="python"
+              BUILD_MODE="none"
+              ;;
+
+            go)
+              CODEQL_LANGUAGE="go"
+              BUILD_MODE="none"
+              ;;
+
+            actions)
+              CODEQL_LANGUAGE="actions"
+              BUILD_MODE="none"
+              ;;
+
+            *)
+              echo "::error::Unsupported language '${LANGUAGE}'."
+              exit 1
+              ;;
+
+          esac
+
+          echo "language=${CODEQL_LANGUAGE}" >> "${GITHUB_OUTPUT}"
+          echo "build-mode=${BUILD_MODE}" >> "${GITHUB_OUTPUT}"
+
+          echo "CodeQL language: ${CODEQL_LANGUAGE}"
+          echo "CodeQL build mode: ${BUILD_MODE}"
+
+      # =======================================================
+      # Initialize
+      # =======================================================
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@<APPROVED_FULL_SHA>
+        with:
+          languages: ${{ steps.config.outputs.language }}
+          build-mode: ${{ steps.config.outputs.build-mode }}
+          queries: ${{ inputs.query_suite }}
+
+      # =======================================================
+      # Analyze
+      # =======================================================
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@<APPROVED_FULL_SHA>
+        with:
+          category: >-
+            /component:${{
+              inputs.component_name
+            }}/language:${{
+              steps.config.outputs.language
+            }}
+
+      # =======================================================
+      # Summary
+      # =======================================================
+
+      - name: Generate CodeQL summary
+        if: ${{ always() }}
+        shell: bash
+        env:
+          COMPONENT_NAME: ${{ inputs.component_name }}
+          COMPONENT_PATH: ${{ inputs.component_path }}
+          APPLICATION_LANGUAGE: ${{ inputs.language }}
+          CODEQL_LANGUAGE: ${{ steps.config.outputs.language }}
+          BUILD_MODE: ${{ steps.config.outputs.build-mode }}
+          QUERY_SUITE: ${{ inputs.query_suite }}
+        run: |
+          {
+            echo "## CodeQL Security"
+            echo
+            echo "| Configuration | Value |"
+            echo "|---|---|"
+            echo "| Component | \`${COMPONENT_NAME}\` |"
+            echo "| Component path | \`${COMPONENT_PATH}\` |"
+            echo "| Application language | \`${APPLICATION_LANGUAGE}\` |"
+            echo "| CodeQL language | \`${CODEQL_LANGUAGE}\` |"
+            echo "| Build mode | \`${BUILD_MODE}\` |"
+            echo "| Query suite | \`${QUERY_SUITE}\` |"
+            echo "| Results | GitHub Code Scanning |"
+          } >> "${GITHUB_STEP_SUMMARY}"

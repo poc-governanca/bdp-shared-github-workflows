@@ -1,0 +1,32 @@
+"containerScope": {
+  "type": "object",
+  "additionalProperties": false,
+
+  "required": [
+    "image",
+    "package",
+    "package_type"
+  ],
+
+  "properties": {
+    "image": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+
+    "package": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300
+    },
+
+    "package_type": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100,
+        "pattern": "^[A-Za-z0-9._-]+$"
+    }
+  }
+}

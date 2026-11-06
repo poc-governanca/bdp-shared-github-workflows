@@ -1,0 +1,189 @@
+name: Reusable Security
+
+on:
+  workflow_call:
+    inputs:
+      tier:
+        description: "Asset tier: 1, 2 or 3"
+        required: true
+        type: string
+
+      language:
+        description: "Primary application language"
+        required: true
+        type: string
+
+      has_iac:
+        description: "Repository contains Infrastructure as Code"
+        required: false
+        type: boolean
+        default: false
+
+      has_container:
+        description: "Repository builds a container image"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+
+  validate-inputs:
+    name: Validate Security Configuration
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate Tier
+        shell: bash
+        run: |
+          case "${{ inputs.tier }}" in
+            1|2|3)
+              echo "Valid tier: ${{ inputs.tier }}"
+              ;;
+            *)
+              echo "::error::Invalid tier '${{ inputs.tier }}'. Allowed values: 1, 2, 3."
+              exit 1
+              ;;
+          esac
+
+      - name: Validate Language
+        shell: bash
+        run: |
+          case "${{ inputs.language }}" in
+            dotnet|java|javascript|typescript|python|go)
+              echo "Supported language: ${{ inputs.language }}"
+              ;;
+            *)
+              echo "::error::Unsupported language '${{ inputs.language }}'."
+              exit 1
+              ;;
+          esac
+
+  dependency-review:
+    name: Dependency Review
+    needs:
+      - validate-inputs
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@<APPROVED_FULL_SHA> # approved version
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@<APPROVED_FULL_SHA> # approved version
+
+  codeql:
+    name: CodeQL
+    needs:
+      - validate-inputs
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@<APPROVED_FULL_SHA> # approved version
+
+      # CodeQL initialization/configuration
+      # will be added after the language mapping decision.
+
+  iac-scan:
+    name: IaC Security Scan
+    needs:
+      - validate-inputs
+
+    if: ${{ inputs.has_iac }}
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@<APPROVED_FULL_SHA> # approved version
+
+      # Trivy IaC scan will be added in the next implementation step.
+
+  container-scan:
+    name: Container Security Scan
+    needs:
+      - validate-inputs
+
+    if: ${{ inputs.has_container }}
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@<APPROVED_FULL_SHA> # approved version
+
+      # Build + Trivy image scan will be added after
+      # defining the image contract.
+
+  security-gate:
+    name: security-gate
+
+    if: ${{ always() }}
+
+    needs:
+      - validate-inputs
+      - dependency-review
+      - codeql
+      - iac-scan
+      - container-scan
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Evaluate Security Gate
+        shell: bash
+        env:
+          TIER: ${{ inputs.tier }}
+
+          VALIDATE_RESULT: ${{ needs.validate-inputs.result }}
+          DEPENDENCY_RESULT: ${{ needs.dependency-review.result }}
+          CODEQL_RESULT: ${{ needs.codeql.result }}
+          IAC_RESULT: ${{ needs.iac-scan.result }}
+          CONTAINER_RESULT: ${{ needs.container-scan.result }}
+
+        run: |
+          echo "Security Gate"
+          echo "======================================"
+          echo "Tier..............: ${TIER}"
+          echo "Configuration.....: ${VALIDATE_RESULT}"
+          echo "Dependency Review.: ${DEPENDENCY_RESULT}"
+          echo "CodeQL............: ${CODEQL_RESULT}"
+          echo "IaC...............: ${IAC_RESULT}"
+          echo "Container.........: ${CONTAINER_RESULT}"
+          echo "======================================"
+
+          if [[ "${VALIDATE_RESULT}" != "success" ]]; then
+            echo "::error::Invalid security configuration."
+            exit 1
+          fi
+
+          if [[ "${DEPENDENCY_RESULT}" != "success" ]]; then
+            echo "::error::Dependency Review did not pass."
+            exit 1
+          fi
+
+          if [[ "${CODEQL_RESULT}" != "success" ]]; then
+            echo "::error::CodeQL did not pass."
+            exit 1
+          fi
+
+          if [[ "${IAC_RESULT}" == "failure" || "${IAC_RESULT}" == "cancelled" ]]; then
+            echo "::error::IaC security validation did not pass."
+            exit 1
+          fi
+
+          if [[ "${CONTAINER_RESULT}" == "failure" || "${CONTAINER_RESULT}" == "cancelled" ]]; then
+            echo "::error::Container security validation did not pass."
+            exit 1
+          fi
+
+          echo "Security Gate: PASS"

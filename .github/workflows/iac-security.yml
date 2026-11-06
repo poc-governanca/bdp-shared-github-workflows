@@ -1,0 +1,362 @@
+name: Reusable IaC Security
+
+on:
+  workflow_call:
+    inputs:
+      tier:
+        description: "Asset Tier: 1, 2 or 3"
+        required: true
+        type: string
+
+      scan_path:
+        description: "Path containing Infrastructure as Code"
+        required: false
+        type: string
+        default: "."
+
+      tooling_ref:
+        description: >
+          Version or commit SHA of the shared security tooling.
+        required: false
+        type: string
+        default: "v1"
+
+permissions:
+  contents: read
+
+jobs:
+  iac-security:
+    name: IaC Security
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      # -------------------------------------------------------
+      # Configuration
+      # -------------------------------------------------------
+
+      - name: Validate asset Tier
+        shell: bash
+        env:
+          TIER: ${{ inputs.tier }}
+        run: |
+          case "${TIER}" in
+            1|2|3)
+              echo "Valid asset Tier: ${TIER}"
+              ;;
+            *)
+              echo "::error::Invalid asset Tier '${TIER}'."
+              echo "::error::Allowed values: 1, 2 or 3."
+              exit 1
+              ;;
+          esac
+
+      # -------------------------------------------------------
+      # Application repository
+      # -------------------------------------------------------
+
+      - name: Checkout application repository
+        uses: actions/checkout@<APPROVED_FULL_SHA> # approved version
+        with:
+          fetch-depth: 0
+
+      # -------------------------------------------------------
+      # Scan path
+      # -------------------------------------------------------
+
+      - name: Validate IaC scan path
+        shell: bash
+        env:
+          SCAN_PATH: ${{ inputs.scan_path }}
+        run: |
+          if [[ -z "${SCAN_PATH}" ]]; then
+            echo "::error::IaC scan path cannot be empty."
+            exit 1
+          fi
+
+          if [[ "${SCAN_PATH}" == *"*"* || "${SCAN_PATH}" == *"?"* ]]; then
+            echo "::error::Wildcards are not permitted in scan_path."
+            exit 1
+          fi
+
+          if [[ "${SCAN_PATH}" == *".."* ]]; then
+            echo "::error::Parent traversal is not permitted in scan_path."
+            exit 1
+          fi
+
+          if [[ ! -d "${SCAN_PATH}" && ! -f "${SCAN_PATH}" ]]; then
+            echo "::error::IaC scan path does not exist: ${SCAN_PATH}"
+            exit 1
+          fi
+
+          echo "IaC scan path: ${SCAN_PATH}"
+
+      - name: Validate IaC content exists
+        shell: bash
+        env:
+          SCAN_PATH: ${{ inputs.scan_path }}
+        run: |
+          MATCH_COUNT="$(
+            find "${SCAN_PATH}" \
+              -type f \
+              \( \
+                -name "*.tf" \
+                -o -name "*.tf.json" \
+                -o -name "*.yaml" \
+                -o -name "*.yml" \
+                -o -name "Dockerfile" \
+                -o -name "*.template" \
+              \) \
+              2>/dev/null \
+              | wc -l
+          )"
+
+          if [[ "${MATCH_COUNT}" -eq 0 ]]; then
+            echo "::error::has_iac was enabled, but no supported IaC files were found in ${SCAN_PATH}."
+            exit 1
+          fi
+
+          echo "Supported IaC files found: ${MATCH_COUNT}"
+
+      # -------------------------------------------------------
+      # Shared tooling
+      # -------------------------------------------------------
+
+      - name: Checkout shared security tooling
+        uses: actions/checkout@<APPROVED_FULL_SHA> # approved version
+        with:
+          repository: poc-governanca/bdp-shared-github-workflows
+          ref: ${{ inputs.tooling_ref }}
+          path: ".shared-workflows"
+
+      - name: Validate governed Trivy exceptions
+        uses: ./.shared-workflows/.github/actions/validate-trivy-exceptions
+        with:
+          exceptions-file: ".security/trivy-ignore.yaml"
+          tooling-root: ".shared-workflows"
+
+      # -------------------------------------------------------
+      # Raw Trivy scan
+      # -------------------------------------------------------
+
+      - name: Run Trivy IaC JSON scan
+        uses: aquasecurity/trivy-action@<APPROVED_FULL_SHA> # approved version
+        with:
+          scan-type: "config"
+          scan-ref: ${{ inputs.scan_path }}
+          format: "json"
+          output: "trivy-iac-results.json"
+          severity: "UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL"
+          exit-code: "0"
+
+      - name: Validate Trivy JSON output
+        shell: bash
+        run: |
+          if [[ ! -s "trivy-iac-results.json" ]]; then
+            echo "::error::Trivy did not generate a valid JSON result."
+            exit 1
+          fi
+
+          python -m json.tool \
+            "trivy-iac-results.json" \
+            > /dev/null
+
+      # -------------------------------------------------------
+      # Governance engine
+      # -------------------------------------------------------
+
+      - name: Install policy engine dependencies
+        shell: bash
+        run: |
+          python -m pip install \
+            "PyYAML==<APPROVED_VERSION>" \
+            "jsonschema==<APPROVED_VERSION>"
+
+      - name: Evaluate effective IaC findings
+        id: evaluate
+        shell: bash
+        env:
+          TIER: ${{ inputs.tier }}
+        run: |
+          set +e
+
+          python \
+            ".shared-workflows/scripts/security/evaluate-trivy-iac.py" \
+            --results "trivy-iac-results.json" \
+            --exceptions ".security/trivy-ignore.yaml" \
+            --tier "${TIER}" \
+            --output "effective-iac-results.json"
+
+          EVALUATION_EXIT_CODE="$?"
+
+          set -e
+
+          echo "exit-code=${EVALUATION_EXIT_CODE}" \
+            >> "${GITHUB_OUTPUT}"
+
+          case "${EVALUATION_EXIT_CODE}" in
+            0)
+              echo "result=PASS" >> "${GITHUB_OUTPUT}"
+              ;;
+
+            1)
+              echo "result=FAIL" >> "${GITHUB_OUTPUT}"
+              ;;
+
+            2)
+              echo "result=ERROR" >> "${GITHUB_OUTPUT}"
+              ;;
+
+            *)
+              echo "result=ERROR" >> "${GITHUB_OUTPUT}"
+
+              echo "::error::Unexpected evaluator exit code: ${EVALUATION_EXIT_CODE}"
+
+              exit 2
+              ;;
+          esac
+
+      # -------------------------------------------------------
+      # SARIF evidence
+      # -------------------------------------------------------
+
+      - name: Run Trivy IaC SARIF scan
+        if: ${{ always() }}
+
+        uses: aquasecurity/trivy-action@<APPROVED_FULL_SHA> # approved version
+
+        with:
+          scan-type: "config"
+          scan-ref: ${{ inputs.scan_path }}
+          format: "sarif"
+          output: "trivy-iac-results.sarif"
+          severity: "UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL"
+          exit-code: "0"
+
+      - name: Upload Trivy SARIF
+        if: ${{ always() && hashFiles('trivy-iac-results.sarif') != '' }}
+
+        uses: github/codeql-action/upload-sarif@<APPROVED_FULL_SHA> # approved version
+
+        with:
+          sarif_file: "trivy-iac-results.sarif"
+          category: "trivy-iac"
+
+      # -------------------------------------------------------
+      # Evidence artifacts
+      # -------------------------------------------------------
+
+      - name: Upload IaC security evidence
+        if: ${{ always() }}
+
+        uses: actions/upload-artifact@<APPROVED_FULL_SHA> # approved version
+
+        with:
+          name: "iac-security-evidence"
+          retention-days: 30
+
+          path: |
+            trivy-iac-results.json
+            trivy-iac-results.sarif
+            effective-iac-results.json
+
+          if-no-files-found: error
+
+      # -------------------------------------------------------
+      # Job summary
+      # -------------------------------------------------------
+
+      - name: Generate IaC Security summary
+        if: ${{ always() }}
+
+        shell: bash
+        env:
+          TIER: ${{ inputs.tier }}
+          SCAN_PATH: ${{ inputs.scan_path }}
+          EVALUATION_RESULT: ${{ steps.evaluate.outputs.result }}
+        run: |
+          {
+            echo "## IaC Security"
+            echo
+            echo "| Configuration | Value |"
+            echo "|---|---|"
+            echo "| Asset Tier | ${TIER} |"
+            echo "| Scan path | \`${SCAN_PATH}\` |"
+            echo "| Scanner | Trivy |"
+            echo "| Exemptions | Governed by \`.security/trivy-ignore.yaml\` |"
+            echo "| Result | ${EVALUATION_RESULT:-ERROR} |"
+            echo
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          if [[ -f "effective-iac-results.json" ]]; then
+            python - <<'PY' >> "${GITHUB_STEP_SUMMARY}"
+          import json
+
+          with open(
+              "effective-iac-results.json",
+              "r",
+              encoding="utf-8",
+          ) as file:
+              result = json.load(file)
+
+          summary = result["summary"]
+          active = summary["active"]
+
+          print("| Finding status | Count |")
+          print("|---|---:|")
+          print(f"| Critical active | {active['critical']} |")
+          print(f"| High active | {active['high']} |")
+          print(f"| Medium active | {active['medium']} |")
+          print(f"| Low active | {active['low']} |")
+          print(f"| Unknown active | {active['unknown']} |")
+          print(f"| Exempted | {summary['exempted']} |")
+          print(
+              "| Stale exceptions | "
+              f"{summary['stale_exceptions']} |"
+          )
+          print(
+              "| Blocking findings | "
+              f"{summary['blocking_findings']} |"
+          )
+          print()
+          print(
+              f"**Security Gate:** {result['gate']}"
+          )
+          PY
+          fi
+
+      # -------------------------------------------------------
+      # Final enforcement
+      # -------------------------------------------------------
+
+      - name: Enforce IaC Security Gate
+        if: ${{ always() }}
+
+        shell: bash
+        env:
+          RESULT: ${{ steps.evaluate.outputs.result }}
+        run: |
+          case "${RESULT}" in
+            PASS)
+              echo "IaC Security Gate: PASS"
+              ;;
+
+            FAIL)
+              echo "::error::IaC Security Gate failed because active blocking findings exist."
+              exit 1
+              ;;
+
+            ERROR|"")
+              echo "::error::IaC Security Gate failed because the evaluation could not be completed safely."
+              exit 1
+              ;;
+
+            *)
+              echo "::error::Unknown IaC Security Gate result: ${RESULT}"
+              exit 1
+              ;;
+          esac

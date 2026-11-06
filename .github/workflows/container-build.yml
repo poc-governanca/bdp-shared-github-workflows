@@ -1,0 +1,453 @@
+name: Reusable Container Build
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        description: "Logical container image name"
+        required: true
+        type: string
+
+      dockerfile:
+        description: "Path to the Dockerfile"
+        required: false
+        type: string
+        default: "./Dockerfile"
+
+      build_context:
+        description: "Docker build context"
+        required: false
+        type: string
+        default: "."
+
+      platforms:
+        description: "Target container platform"
+        required: false
+        type: string
+        default: "linux/amd64"
+
+      evidence_retention_days:
+        description: "Build evidence retention period"
+        required: false
+        type: number
+        default: 30
+
+    outputs:
+      image_ref:
+        description: "Tagged container image reference"
+        value: ${{ jobs.container-build.outputs.image_ref }}
+
+      image_tag:
+        description: "Generated corporate image tag"
+        value: ${{ jobs.container-build.outputs.image_tag }}
+
+      image_digest:
+        description: "Immutable OCI image digest"
+        value: ${{ jobs.container-build.outputs.image_digest }}
+
+      image_uri:
+        description: "Immutable image URI using digest"
+        value: ${{ jobs.container-build.outputs.image_uri }}
+
+permissions:
+  contents: read
+
+jobs:
+  container-build:
+
+    name: Container Build
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+
+    outputs:
+      image_ref: ${{ steps.outputs.outputs.image_ref }}
+      image_tag: ${{ steps.outputs.outputs.image_tag }}
+      image_digest: ${{ steps.outputs.outputs.image_digest }}
+      image_uri: ${{ steps.outputs.outputs.image_uri }}
+
+    env:
+      REGISTRY: ghcr.io
+
+    steps:
+
+      # =======================================================
+      # Checkout
+      # =======================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@<APPROVED_FULL_SHA> # approved version
+        with:
+          fetch-depth: 0
+
+      # =======================================================
+      # Input validation
+      # =======================================================
+
+      - name: Validate build inputs
+        shell: bash
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          BUILD_CONTEXT: ${{ inputs.build_context }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${IMAGE_NAME}" ]]; then
+            echo "::error::image_name cannot be empty."
+            exit 1
+          fi
+
+          if [[ ! "${IMAGE_NAME}" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+            echo "::error::Invalid image_name '${IMAGE_NAME}'."
+            echo "::error::Use lowercase letters, numbers, '.', '_' or '-'."
+            exit 1
+          fi
+
+          if [[ ! -f "${DOCKERFILE}" ]]; then
+            echo "::error::Dockerfile does not exist: ${DOCKERFILE}"
+            exit 1
+          fi
+
+          if [[ ! -d "${BUILD_CONTEXT}" ]]; then
+            echo "::error::Build context does not exist: ${BUILD_CONTEXT}"
+            exit 1
+          fi
+
+      # =======================================================
+      # Trust boundary
+      # =======================================================
+
+      - name: Validate trusted execution context
+        id: trust
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          TRUSTED="true"
+
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+
+            if [[ -z "${HEAD_REPOSITORY}" ]]; then
+              echo "::error::Unable to determine Pull Request source repository."
+              exit 1
+            fi
+
+            if [[ "${HEAD_REPOSITORY}" != "${BASE_REPOSITORY}" ]]; then
+              TRUSTED="false"
+            fi
+
+          fi
+
+          echo "trusted=${TRUSTED}" >> "${GITHUB_OUTPUT}"
+
+          if [[ "${TRUSTED}" != "true" ]]; then
+            echo "::error::Untrusted/fork Pull Requests are not allowed to publish container images."
+            echo "::error::Run the non-privileged CI workflow instead."
+            exit 1
+          fi
+
+      # =======================================================
+      # Tag generation
+      # =======================================================
+
+      - name: Generate corporate image tag
+        id: tag
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          SHORT_SHA="${SHA:0:7}"
+
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+
+            if [[ -z "${PR_NUMBER}" ]]; then
+              echo "::error::Pull Request number is not available."
+              exit 1
+            fi
+
+            IMAGE_TAG="pr-${PR_NUMBER}-sha-${SHORT_SHA}"
+
+          elif [[ "${REF_NAME}" == "develop" ]]; then
+
+            IMAGE_TAG="develop-sha-${SHORT_SHA}"
+
+          elif [[ "${REF_NAME}" == release/* ]]; then
+
+            VERSION="${REF_NAME#release/}"
+
+            if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Invalid release branch '${REF_NAME}'."
+              echo "::error::Expected release/<major>.<minor>.<patch>."
+              exit 1
+            fi
+
+            IMAGE_TAG="rc-${VERSION}-sha-${SHORT_SHA}"
+
+          else
+
+            echo "::error::Container build is not authorized for ref '${REF_NAME}' and event '${EVENT_NAME}'."
+            exit 1
+
+          fi
+
+          echo "image_tag=${IMAGE_TAG}" >> "${GITHUB_OUTPUT}"
+
+          echo "Generated image tag: ${IMAGE_TAG}"
+
+      # =======================================================
+      # Image coordinates
+      # =======================================================
+
+      - name: Generate image coordinates
+        id: image
+        shell: bash
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          IMAGE_TAG: ${{ steps.tag.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+
+          OWNER="$(
+            echo "${REPOSITORY_OWNER}" \
+              | tr '[:upper:]' '[:lower:]'
+          )"
+
+          IMAGE_BASE="${REGISTRY}/${OWNER}/${IMAGE_NAME}"
+          IMAGE_REF="${IMAGE_BASE}:${IMAGE_TAG}"
+
+          echo "image_base=${IMAGE_BASE}" >> "${GITHUB_OUTPUT}"
+          echo "image_ref=${IMAGE_REF}" >> "${GITHUB_OUTPUT}"
+
+          echo "Image reference: ${IMAGE_REF}"
+
+      # =======================================================
+      # Buildx
+      # =======================================================
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@<APPROVED_FULL_SHA> # approved version
+
+      # =======================================================
+      # GHCR authentication
+      # =======================================================
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@<APPROVED_FULL_SHA> # approved version
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # =======================================================
+      # Build and publish
+      # =======================================================
+
+      - name: Build and push container image
+        id: build
+        uses: docker/build-push-action@<APPROVED_FULL_SHA> # approved version
+
+        with:
+          context: ${{ inputs.build_context }}
+          file: ${{ inputs.dockerfile }}
+
+          platforms: ${{ inputs.platforms }}
+
+          push: true
+
+          tags: |
+            ${{ steps.image.outputs.image_ref }}
+
+          pull: true
+
+          provenance: mode=max
+
+          sbom: true
+
+          cache-from: type=gha
+
+          cache-to: type=gha,mode=max
+
+      # =======================================================
+      # Validate digest
+      # =======================================================
+
+      - name: Validate container digest
+        shell: bash
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${DIGEST}" ]]; then
+            echo "::error::Docker Buildx did not return an image digest."
+            exit 1
+          fi
+
+          if [[ ! "${DIGEST}" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo "::error::Invalid OCI digest returned by Buildx: ${DIGEST}"
+            exit 1
+          fi
+
+          echo "Immutable image digest: ${DIGEST}"
+
+      # =======================================================
+      # Immutable image URI
+      # =======================================================
+
+      - name: Generate immutable image URI
+        id: outputs
+        shell: bash
+        env:
+          IMAGE_BASE: ${{ steps.image.outputs.image_base }}
+          IMAGE_REF: ${{ steps.image.outputs.image_ref }}
+          IMAGE_TAG: ${{ steps.tag.outputs.image_tag }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+
+          IMAGE_URI="${IMAGE_BASE}@${IMAGE_DIGEST}"
+
+          echo "image_ref=${IMAGE_REF}" >> "${GITHUB_OUTPUT}"
+          echo "image_tag=${IMAGE_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "image_digest=${IMAGE_DIGEST}" >> "${GITHUB_OUTPUT}"
+          echo "image_uri=${IMAGE_URI}" >> "${GITHUB_OUTPUT}"
+
+          echo "Immutable image URI: ${IMAGE_URI}"
+
+      # =======================================================
+      # Generate CycloneDX SBOM
+      # =======================================================
+
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@<APPROVED_FULL_SHA> # approved version
+        with:
+          image: ${{ steps.outputs.outputs.image_uri }}
+          format: "cyclonedx-json"
+          output-file: "sbom.cdx.json"
+          upload-artifact: false
+
+      - name: Validate CycloneDX SBOM
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! -s "sbom.cdx.json" ]]; then
+            echo "::error::CycloneDX SBOM was not generated."
+            exit 1
+          fi
+
+          python -m json.tool \
+            "sbom.cdx.json" \
+            > /dev/null
+
+          echo "CycloneDX SBOM generated successfully."
+
+      # =======================================================
+      # Build metadata
+      # =======================================================
+
+      - name: Generate build metadata
+        shell: bash
+        env:
+          IMAGE_REF: ${{ steps.outputs.outputs.image_ref }}
+          IMAGE_URI: ${{ steps.outputs.outputs.image_uri }}
+          IMAGE_DIGEST: ${{ steps.outputs.outputs.image_digest }}
+          IMAGE_TAG: ${{ steps.outputs.outputs.image_tag }}
+          COMMIT_SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+          WORKFLOW: ${{ github.workflow }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import json
+          import os
+
+          metadata = {
+              "schema_version": 1,
+              "repository": os.environ["REPOSITORY"],
+              "commit_sha": os.environ["COMMIT_SHA"],
+              "workflow": os.environ["WORKFLOW"],
+              "run_id": os.environ["RUN_ID"],
+              "run_attempt": os.environ["RUN_ATTEMPT"],
+              "image_ref": os.environ["IMAGE_REF"],
+              "image_tag": os.environ["IMAGE_TAG"],
+              "image_digest": os.environ["IMAGE_DIGEST"],
+              "image_uri": os.environ["IMAGE_URI"],
+          }
+
+          with open(
+              "container-build-metadata.json",
+              "w",
+              encoding="utf-8",
+          ) as file:
+              json.dump(
+                  metadata,
+                  file,
+                  indent=2,
+              )
+              file.write("\n")
+          PY
+
+      # =======================================================
+      # Evidence
+      # =======================================================
+
+      - name: Upload container build evidence
+        uses: actions/upload-artifact@<APPROVED_FULL_SHA> # approved version
+        with:
+          name: "container-build-evidence"
+          retention-days: ${{ inputs.evidence_retention_days }}
+
+          path: |
+            sbom.cdx.json
+            container-build-metadata.json
+
+          if-no-files-found: error
+
+      # =======================================================
+      # Summary
+      # =======================================================
+
+      - name: Generate container build summary
+        shell: bash
+        env:
+          IMAGE_REF: ${{ steps.outputs.outputs.image_ref }}
+          IMAGE_URI: ${{ steps.outputs.outputs.image_uri }}
+          IMAGE_DIGEST: ${{ steps.outputs.outputs.image_digest }}
+          IMAGE_TAG: ${{ steps.outputs.outputs.image_tag }}
+        run: |
+          {
+            echo "## Container Build"
+            echo
+            echo "| Property | Value |"
+            echo "|---|---|"
+            echo "| Registry | GHCR |"
+            echo "| Image tag | \`${IMAGE_TAG}\` |"
+            echo "| Image ref | \`${IMAGE_REF}\` |"
+            echo "| Digest | \`${IMAGE_DIGEST}\` |"
+            echo "| Immutable URI | \`${IMAGE_URI}\` |"
+            echo "| SBOM attestation | Enabled |"
+            echo "| Build provenance | mode=max |"
+            echo "| CycloneDX JSON | Generated |"
+            echo "| Build cache | GitHub Actions Cache |"
+          } >> "${GITHUB_STEP_SUMMARY}"
