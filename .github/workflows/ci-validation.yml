@@ -1,0 +1,354 @@
+name: Reusable Repository Validation
+
+on:
+  workflow_call:
+    inputs:
+      repository_tier:
+        description: "Repository Tier: 1, 2 or 3"
+        required: true
+        type: number
+
+      manifest_path:
+        description: "Path to components manifest"
+        required: false
+        type: string
+        default: ".github/components.yml"
+
+      tooling_ref:
+        description: "Shared tooling version or commit"
+        required: false
+        type: string
+        default: "v1"
+
+      base_sha:
+        description: "Optional base SHA"
+        required: false
+        type: string
+        default: ""
+
+      head_sha:
+        description: "Optional head SHA"
+        required: false
+        type: string
+        default: ""
+
+      evidence_retention_days:
+        description: "Evidence retention"
+        required: false
+        type: number
+        default: 7
+
+    outputs:
+      result:
+        description: "Validation result"
+        value: ${{ jobs.validation-gate.outputs.result }}
+
+      affected_components:
+        description: "JSON array of affected components"
+        value: ${{ jobs.detect-changes.outputs.affected_components }}
+
+      affected_components_count:
+        description: "Affected component count"
+        value: ${{ jobs.detect-changes.outputs.affected_components_count }}
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate Validation Configuration
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Validate inputs
+        shell: bash
+        env:
+          REPOSITORY_TIER: ${{ inputs.repository_tier }}
+          MANIFEST_PATH: ${{ inputs.manifest_path }}
+          TOOLING_REF: ${{ inputs.tooling_ref }}
+          RETENTION_DAYS: ${{ inputs.evidence_retention_days }}
+        run: |
+          set -euo pipefail
+
+          case "${REPOSITORY_TIER}" in
+            1|2|3)
+              ;;
+            *)
+              echo "::error::Invalid repository_tier '${REPOSITORY_TIER}'."
+              exit 1
+              ;;
+          esac
+
+          if [[ -z "${MANIFEST_PATH}" || "${MANIFEST_PATH}" == /* ]]; then
+            echo "::error::Invalid manifest_path."
+            exit 1
+          fi
+
+          if [[ \
+            "${MANIFEST_PATH}" == ".." \
+            || "${MANIFEST_PATH}" == ../* \
+            || "${MANIFEST_PATH}" == */../* \
+            || "${MANIFEST_PATH}" == */.. \
+          ]]; then
+            echo "::error::Parent traversal is not allowed."
+            exit 1
+          fi
+
+          if [[ -z "${TOOLING_REF}" ]]; then
+            echo "::error::tooling_ref cannot be empty."
+            exit 1
+          fi
+
+          if ! [[ "${RETENTION_DAYS}" =~ ^[0-9]+$ ]]; then
+            echo "::error::evidence_retention_days must be numeric."
+            exit 1
+          fi
+
+          if [[ "${RETENTION_DAYS}" -lt 1 || "${RETENTION_DAYS}" -gt 30 ]]; then
+            echo "::error::Validation evidence retention must be between 1 and 30."
+            exit 1
+          fi
+
+  detect-changes:
+    name: Detect Changes
+
+    needs:
+      - validate
+
+    uses: ./.github/workflows/detect-changes.yml
+
+    permissions:
+      contents: read
+
+    with:
+      manifest_path: ${{ inputs.manifest_path }}
+      tooling_ref: ${{ inputs.tooling_ref }}
+      base_sha: ${{ inputs.base_sha }}
+      head_sha: ${{ inputs.head_sha }}
+      force_full_fan_out: false
+      evidence_retention_days: ${{ inputs.evidence_retention_days }}
+
+  component-validation:
+    name: "${{ matrix.name }} / Validation"
+
+    needs:
+      - detect-changes
+
+    if: >-
+      ${{
+        needs.detect-changes.outputs.has_affected_components
+        == 'true'
+      }}
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.detect-changes.outputs.matrix) }}
+
+    uses: ./.github/workflows/component-ci.yml
+
+    permissions:
+      contents: read
+      security-events: write
+
+    with:
+      component_name: ${{ matrix.name }}
+      component_type: ${{ matrix.type }}
+      component_path: ${{ matrix.path }}
+      language: ${{ matrix.language }}
+      tier: ${{ matrix.tier }}
+      application_changed: ${{ matrix.application_changed }}
+      build_enabled: ${{ matrix.build_enabled }}
+      build_profile: ${{ matrix.build_profile }}
+      container_enabled: ${{ matrix.container_enabled }}
+      image_name: ${{ matrix.image_name }}
+      dockerfile: ${{ matrix.dockerfile }}
+      build_context: ${{ matrix.build_context }}
+      infrastructure_enabled: ${{ matrix.infrastructure_enabled }}
+      infrastructure_changed: ${{ matrix.infrastructure_changed }}
+      infrastructure_scan_path: ${{ matrix.infrastructure_scan_path }}
+      execution_mode: "validation"
+      tooling_ref: ${{ inputs.tooling_ref }}
+
+  github-actions-security:
+    name: Repository / GitHub Actions Security
+
+    needs:
+      - detect-changes
+
+    if: >-
+      ${{
+        needs.detect-changes.outputs.github_actions_affected
+        == 'true'
+      }}
+
+    uses: ./.github/workflows/codeql-security.yml
+
+    permissions:
+      contents: read
+      security-events: write
+
+    with:
+      component_name: "repository-actions"
+      component_path: ".github/workflows"
+      language: "actions"
+      query_suite: "security-extended"
+
+  repository-iac-security:
+    name: Repository / IaC Security
+
+    needs:
+      - detect-changes
+
+    if: >-
+      ${{
+        needs.detect-changes.outputs.infrastructure_affected
+        == 'true'
+      }}
+
+    uses: ./.github/workflows/iac-security.yml
+
+    permissions:
+      contents: read
+      security-events: write
+
+    with:
+      tier: ${{ inputs.repository_tier }}
+      scan_path: ${{ needs.detect-changes.outputs.infrastructure_scan_path }}
+      tooling_ref: ${{ inputs.tooling_ref }}
+
+  validation-gate:
+    name: validation-gate
+
+    if: ${{ always() }}
+
+    needs:
+      - validate
+      - detect-changes
+      - component-validation
+      - github-actions-security
+      - repository-iac-security
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    outputs:
+      result: ${{ steps.gate.outputs.result }}
+
+    steps:
+      - name: Evaluate Validation Gate
+        id: gate
+        shell: bash
+        env:
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+          DETECT_RESULT: ${{ needs.detect-changes.result }}
+          COMPONENT_RESULT: ${{ needs.component-validation.result }}
+          ACTIONS_RESULT: ${{ needs.github-actions-security.result }}
+          IAC_RESULT: ${{ needs.repository-iac-security.result }}
+
+          HAS_COMPONENTS: ${{ needs.detect-changes.outputs.has_affected_components }}
+          ACTIONS_AFFECTED: ${{ needs.detect-changes.outputs.github_actions_affected }}
+          IAC_AFFECTED: ${{ needs.detect-changes.outputs.infrastructure_affected }}
+        run: |
+          set -euo pipefail
+
+          FINAL_RESULT="PASS"
+
+          check_result() {
+            local expected="$1"
+            local name="$2"
+            local actual="$3"
+
+            if [[ "${actual}" != "${expected}" ]]; then
+              echo "::error::${name}: expected ${expected}, got ${actual}."
+              FINAL_RESULT="FAIL"
+            fi
+          }
+
+          check_result \
+            "success" \
+            "Validation configuration" \
+            "${VALIDATE_RESULT}"
+
+          check_result \
+            "success" \
+            "Change Detection" \
+            "${DETECT_RESULT}"
+
+          if [[ "${DETECT_RESULT}" == "success" ]]; then
+            if [[ "${HAS_COMPONENTS}" == "true" ]]; then
+              check_result \
+                "success" \
+                "Component Validation" \
+                "${COMPONENT_RESULT}"
+            else
+              check_result \
+                "skipped" \
+                "Component Validation" \
+                "${COMPONENT_RESULT}"
+            fi
+
+            if [[ "${ACTIONS_AFFECTED}" == "true" ]]; then
+              check_result \
+                "success" \
+                "GitHub Actions Security" \
+                "${ACTIONS_RESULT}"
+            else
+              check_result \
+                "skipped" \
+                "GitHub Actions Security" \
+                "${ACTIONS_RESULT}"
+            fi
+
+            if [[ "${IAC_AFFECTED}" == "true" ]]; then
+              check_result \
+                "success" \
+                "Repository IaC" \
+                "${IAC_RESULT}"
+            else
+              check_result \
+                "skipped" \
+                "Repository IaC" \
+                "${IAC_RESULT}"
+            fi
+          fi
+
+          echo "result=${FINAL_RESULT}" >> "${GITHUB_OUTPUT}"
+
+          if [[ "${FINAL_RESULT}" != "PASS" ]]; then
+            echo "::error::Validation Gate: FAIL"
+            exit 1
+          fi
+
+          echo "Validation Gate: PASS"
+
+      - name: Generate Validation Summary
+        if: ${{ always() }}
+        shell: bash
+        env:
+          COMPONENT_RESULT: ${{ needs.component-validation.result }}
+          ACTIONS_RESULT: ${{ needs.github-actions-security.result }}
+          IAC_RESULT: ${{ needs.repository-iac-security.result }}
+          COMPONENTS: ${{ needs.detect-changes.outputs.affected_components }}
+          RESULT: ${{ steps.gate.outputs.result }}
+        run: |
+          {
+            echo "## Repository Validation"
+            echo
+            echo "| Property | Value |"
+            echo "|---|---|"
+            echo "| Mode | \`validation\` |"
+            echo "| Component validation | ${COMPONENT_RESULT} |"
+            echo "| GitHub Actions Security | ${ACTIONS_RESULT} |"
+            echo "| Repository IaC | ${IAC_RESULT} |"
+            echo "| Container Build | skipped |"
+            echo "| Container Security | skipped |"
+            echo "| GHCR publication | disabled |"
+            echo "| Affected components | \`${COMPONENTS:-[]}\` |"
+            echo "| Final result | **${RESULT:-FAIL}** |"
+          } >> "${GITHUB_STEP_SUMMARY}"

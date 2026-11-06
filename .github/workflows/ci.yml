@@ -1,0 +1,403 @@
+name: Reusable Repository CI
+
+on:
+  workflow_call:
+    inputs:
+      repository_tier:
+        description: "Repository controls Tier: 1, 2 or 3"
+        required: true
+        type: number
+
+      manifest_path:
+        description: "Path to the repository components manifest"
+        required: false
+        type: string
+        default: ".github/components.yml"
+
+      tooling_ref:
+        description: "Shared workflows release or commit SHA"
+        required: false
+        type: string
+        default: "v1"
+
+      force_full_fan_out:
+        description: "Force all components and repository controls"
+        required: false
+        type: boolean
+        default: false
+
+      base_sha:
+        description: "Optional explicit base commit SHA"
+        required: false
+        type: string
+        default: ""
+
+      head_sha:
+        description: "Optional explicit head commit SHA"
+        required: false
+        type: string
+        default: ""
+
+      evidence_retention_days:
+        description: "Evidence retention period"
+        required: false
+        type: number
+        default: 30
+
+    outputs:
+      result:
+        description: "Final repository CI result"
+        value: ${{ jobs.ci-gate.outputs.result }}
+
+      affected_components:
+        description: "JSON array of affected components"
+        value: ${{ jobs.detect-changes.outputs.affected_components }}
+
+      affected_components_count:
+        description: "Affected component count"
+        value: ${{ jobs.detect-changes.outputs.affected_components_count }}
+
+      full_fan_out:
+        description: "Full fan-out status"
+        value: ${{ jobs.detect-changes.outputs.full_fan_out }}
+
+      base_sha:
+        description: "Resolved base SHA"
+        value: ${{ jobs.detect-changes.outputs.base_sha }}
+
+      head_sha:
+        description: "Resolved head SHA"
+        value: ${{ jobs.detect-changes.outputs.head_sha }}
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate Repository CI Configuration
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Validate inputs
+        shell: bash
+        env:
+          REPOSITORY_TIER: ${{ inputs.repository_tier }}
+          MANIFEST_PATH: ${{ inputs.manifest_path }}
+          TOOLING_REF: ${{ inputs.tooling_ref }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          RETENTION_DAYS: ${{ inputs.evidence_retention_days }}
+        run: |
+          set -euo pipefail
+
+          validate_sha() {
+            local name="$1"
+            local value="$2"
+
+            if [[ -z "${value}" ]]; then
+              return
+            fi
+
+            if [[ ! "${value}" =~ ^[a-fA-F0-9]{40}$ ]]; then
+              echo "::error::${name} must be a full 40-character SHA."
+              exit 1
+            fi
+          }
+
+          case "${REPOSITORY_TIER}" in
+            1|2|3)
+              ;;
+            *)
+              echo "::error::Invalid repository_tier '${REPOSITORY_TIER}'."
+              exit 1
+              ;;
+          esac
+
+          if [[ -z "${MANIFEST_PATH}" || "${MANIFEST_PATH}" == /* ]]; then
+            echo "::error::Invalid manifest_path."
+            exit 1
+          fi
+
+          if [[ \
+            "${MANIFEST_PATH}" == ".." \
+            || "${MANIFEST_PATH}" == ../* \
+            || "${MANIFEST_PATH}" == */../* \
+            || "${MANIFEST_PATH}" == */.. \
+          ]]; then
+            echo "::error::Parent traversal is not allowed."
+            exit 1
+          fi
+
+          if [[ -z "${TOOLING_REF}" ]]; then
+            echo "::error::tooling_ref cannot be empty."
+            exit 1
+          fi
+
+          validate_sha "base_sha" "${BASE_SHA}"
+          validate_sha "head_sha" "${HEAD_SHA}"
+
+          if ! [[ "${RETENTION_DAYS}" =~ ^[0-9]+$ ]]; then
+            echo "::error::evidence_retention_days must be numeric."
+            exit 1
+          fi
+
+          if [[ "${RETENTION_DAYS}" -lt 1 || "${RETENTION_DAYS}" -gt 90 ]]; then
+            echo "::error::evidence_retention_days must be between 1 and 90."
+            exit 1
+          fi
+
+  detect-changes:
+    name: Detect Changes
+
+    needs:
+      - validate
+
+    uses: ./.github/workflows/detect-changes.yml
+
+    permissions:
+      contents: read
+
+    with:
+      manifest_path: ${{ inputs.manifest_path }}
+      tooling_ref: ${{ inputs.tooling_ref }}
+      base_sha: ${{ inputs.base_sha }}
+      head_sha: ${{ inputs.head_sha }}
+      force_full_fan_out: ${{ inputs.force_full_fan_out }}
+      evidence_retention_days: ${{ inputs.evidence_retention_days }}
+
+  component-ci:
+    name: "${{ matrix.name }} / Component CI"
+
+    needs:
+      - detect-changes
+
+    if: >-
+      ${{
+        needs.detect-changes.outputs.has_affected_components
+        == 'true'
+      }}
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.detect-changes.outputs.matrix) }}
+
+    uses: ./.github/workflows/component-ci.yml
+
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+      id-token: write
+      attestations: write
+
+    with:
+      component_name: ${{ matrix.name }}
+      component_type: ${{ matrix.type }}
+      component_path: ${{ matrix.path }}
+      language: ${{ matrix.language }}
+      tier: ${{ matrix.tier }}
+      application_changed: ${{ matrix.application_changed }}
+      build_enabled: ${{ matrix.build_enabled }}
+      build_profile: ${{ matrix.build_profile }}
+      container_enabled: ${{ matrix.container_enabled }}
+      image_name: ${{ matrix.image_name }}
+      dockerfile: ${{ matrix.dockerfile }}
+      build_context: ${{ matrix.build_context }}
+      infrastructure_enabled: ${{ matrix.infrastructure_enabled }}
+      infrastructure_changed: ${{ matrix.infrastructure_changed }}
+      infrastructure_scan_path: ${{ matrix.infrastructure_scan_path }}
+      execution_mode: "full"
+      tooling_ref: ${{ inputs.tooling_ref }}
+
+  github-actions-security:
+    name: Repository / GitHub Actions Security
+
+    needs:
+      - detect-changes
+
+    if: >-
+      ${{
+        needs.detect-changes.outputs.github_actions_affected
+        == 'true'
+      }}
+
+    uses: ./.github/workflows/codeql-security.yml
+
+    permissions:
+      contents: read
+      security-events: write
+
+    with:
+      component_name: "repository-actions"
+      component_path: ".github/workflows"
+      language: "actions"
+      query_suite: "security-extended"
+
+  repository-iac-security:
+    name: Repository / IaC Security
+
+    needs:
+      - detect-changes
+
+    if: >-
+      ${{
+        needs.detect-changes.outputs.infrastructure_affected
+        == 'true'
+      }}
+
+    uses: ./.github/workflows/iac-security.yml
+
+    permissions:
+      contents: read
+      security-events: write
+
+    with:
+      tier: ${{ inputs.repository_tier }}
+      scan_path: ${{ needs.detect-changes.outputs.infrastructure_scan_path }}
+      tooling_ref: ${{ inputs.tooling_ref }}
+
+  ci-gate:
+    name: ci-gate
+
+    if: ${{ always() }}
+
+    needs:
+      - validate
+      - detect-changes
+      - component-ci
+      - github-actions-security
+      - repository-iac-security
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    outputs:
+      result: ${{ steps.gate.outputs.result }}
+
+    steps:
+      - name: Evaluate Repository CI Gate
+        id: gate
+        shell: bash
+        env:
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+          DETECT_RESULT: ${{ needs.detect-changes.result }}
+          COMPONENT_RESULT: ${{ needs.component-ci.result }}
+          ACTIONS_RESULT: ${{ needs.github-actions-security.result }}
+          IAC_RESULT: ${{ needs.repository-iac-security.result }}
+
+          HAS_COMPONENTS: ${{ needs.detect-changes.outputs.has_affected_components }}
+          ACTIONS_AFFECTED: ${{ needs.detect-changes.outputs.github_actions_affected }}
+          IAC_AFFECTED: ${{ needs.detect-changes.outputs.infrastructure_affected }}
+        run: |
+          set -euo pipefail
+
+          FINAL_RESULT="PASS"
+
+          check_result() {
+            local expected="$1"
+            local name="$2"
+            local actual="$3"
+
+            if [[ "${actual}" != "${expected}" ]]; then
+              echo "::error::${name}: expected ${expected}, got ${actual}."
+              FINAL_RESULT="FAIL"
+            fi
+          }
+
+          check_result \
+            "success" \
+            "Repository configuration" \
+            "${VALIDATE_RESULT}"
+
+          check_result \
+            "success" \
+            "Change Detection" \
+            "${DETECT_RESULT}"
+
+          if [[ "${DETECT_RESULT}" == "success" ]]; then
+            if [[ "${HAS_COMPONENTS}" == "true" ]]; then
+              check_result \
+                "success" \
+                "Component CI" \
+                "${COMPONENT_RESULT}"
+            else
+              check_result \
+                "skipped" \
+                "Component CI" \
+                "${COMPONENT_RESULT}"
+            fi
+
+            if [[ "${ACTIONS_AFFECTED}" == "true" ]]; then
+              check_result \
+                "success" \
+                "GitHub Actions Security" \
+                "${ACTIONS_RESULT}"
+            else
+              check_result \
+                "skipped" \
+                "GitHub Actions Security" \
+                "${ACTIONS_RESULT}"
+            fi
+
+            if [[ "${IAC_AFFECTED}" == "true" ]]; then
+              check_result \
+                "success" \
+                "Repository IaC" \
+                "${IAC_RESULT}"
+            else
+              check_result \
+                "skipped" \
+                "Repository IaC" \
+                "${IAC_RESULT}"
+            fi
+          fi
+
+          echo "result=${FINAL_RESULT}" >> "${GITHUB_OUTPUT}"
+
+          if [[ "${FINAL_RESULT}" != "PASS" ]]; then
+            echo "::error::Repository CI Gate: FAIL"
+            exit 1
+          fi
+
+          echo "Repository CI Gate: PASS"
+
+      - name: Generate Repository CI Summary
+        if: ${{ always() }}
+        shell: bash
+        env:
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+          DETECT_RESULT: ${{ needs.detect-changes.result }}
+          COMPONENT_RESULT: ${{ needs.component-ci.result }}
+          ACTIONS_RESULT: ${{ needs.github-actions-security.result }}
+          IAC_RESULT: ${{ needs.repository-iac-security.result }}
+          COMPONENTS: ${{ needs.detect-changes.outputs.affected_components }}
+          COMPONENT_COUNT: ${{ needs.detect-changes.outputs.affected_components_count }}
+          FULL_FAN_OUT: ${{ needs.detect-changes.outputs.full_fan_out }}
+          BASE_SHA: ${{ needs.detect-changes.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.detect-changes.outputs.head_sha }}
+          FINAL_RESULT: ${{ steps.gate.outputs.result }}
+        run: |
+          {
+            echo "## Repository CI"
+            echo
+            echo "| Property | Value |"
+            echo "|---|---|"
+            echo "| Mode | \`full\` |"
+            echo "| Configuration | ${VALIDATE_RESULT} |"
+            echo "| Change detection | ${DETECT_RESULT} |"
+            echo "| Component CI | ${COMPONENT_RESULT} |"
+            echo "| GitHub Actions Security | ${ACTIONS_RESULT} |"
+            echo "| Repository IaC | ${IAC_RESULT} |"
+            echo "| Base SHA | \`${BASE_SHA}\` |"
+            echo "| Head SHA | \`${HEAD_SHA}\` |"
+            echo "| Full fan-out | ${FULL_FAN_OUT} |"
+            echo "| Component count | ${COMPONENT_COUNT:-0} |"
+            echo "| Components | \`${COMPONENTS:-[]}\` |"
+            echo "| Final result | **${FINAL_RESULT:-FAIL}** |"
+          } >> "${GITHUB_STEP_SUMMARY}"

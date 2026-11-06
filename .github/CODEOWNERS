@@ -36,6 +36,21 @@
 
 /scripts/security/policies/ @org/platform-admins @org/security-reviewers
 
+/.github/workflows/container-build.yml @org/platform-admins @org/security-reviewers
+
+/.github/workflows/container-security.yml @org/platform-admins @org/security-reviewers
+
+/.github/workflows/container-promote.yml @org/platform-admins @org/security-reviewers
+
+/security/attestations/ @org/platform-admins @org/security-reviewers
+
+/.github/workflows/codeql-security.yml @org/platform-admins @org/security-reviewers
+
+/scripts/components/ @org/platform-admins @org/security-reviewers
+
+/.github/workflows/detect-changes.yml @org/platform-admins @org/security-reviewers
+
+
 # ============================================================
 # CI WORKFLOWS
 # ============================================================
@@ -49,6 +64,8 @@
 /.github/workflows/python-ci.yml @org/platform-admins
 
 /.github/workflows/terraform-ci.yml @org/platform-admins
+
+/.github/workflows/dotnet-ci.yml @org/platform-admins @org/security-reviewers
 
 
 # ============================================================

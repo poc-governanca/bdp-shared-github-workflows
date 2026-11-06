@@ -1,0 +1,69 @@
+name: Reusable Untrusted Repository CI
+
+on:
+  workflow_call:
+    inputs:
+      repository_tier:
+        description: "Repository Tier: 1, 2 or 3"
+        required: true
+        type: number
+
+      manifest_path:
+        description: "Path to components manifest"
+        required: false
+        type: string
+        default: ".github/components.yml"
+
+      tooling_ref:
+        description: "Shared tooling version or commit"
+        required: false
+        type: string
+        default: "v1"
+
+      base_sha:
+        description: "Optional base SHA"
+        required: false
+        type: string
+        default: ""
+
+      head_sha:
+        description: "Optional head SHA"
+        required: false
+        type: string
+        default: ""
+
+      evidence_retention_days:
+        description: "Evidence retention"
+        required: false
+        type: number
+        default: 7
+
+    outputs:
+      result:
+        description: "Untrusted validation result"
+        value: ${{ jobs.validation.outputs.result }}
+
+      affected_components:
+        description: "Affected components"
+        value: ${{ jobs.validation.outputs.affected_components }}
+
+permissions:
+  contents: read
+
+jobs:
+  validation:
+    name: Untrusted Validation
+
+    uses: ./.github/workflows/ci-validation.yml
+
+    permissions:
+      contents: read
+      security-events: write
+
+    with:
+      repository_tier: ${{ inputs.repository_tier }}
+      manifest_path: ${{ inputs.manifest_path }}
+      tooling_ref: ${{ inputs.tooling_ref }}
+      base_sha: ${{ inputs.base_sha }}
+      head_sha: ${{ inputs.head_sha }}
+      evidence_retention_days: ${{ inputs.evidence_retention_days }}

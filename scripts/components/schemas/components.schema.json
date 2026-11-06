@@ -1,0 +1,525 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://poc-governanca.dev/schemas/components.schema.json",
+  "title": "BDP Repository Components Manifest",
+  "description": "Schema for monorepo and multirepo component governance.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "components"
+  ],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "global_paths": {
+      "type": "array",
+      "uniqueItems": true,
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/pathPattern"
+      }
+    },
+    "components": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "#/$defs/name"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/component"
+      }
+    },
+    "shared_paths": {
+      "type": "object",
+      "default": {},
+      "propertyNames": {
+        "$ref": "#/$defs/name"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/sharedPath"
+      }
+    },
+    "repository_controls": {
+      "$ref": "#/$defs/repositoryControls"
+    }
+  },
+  "$defs": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "pathPattern": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "profile"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "profile": {
+          "type": "string",
+          "enum": [
+            "dotnet",
+            "java",
+            "node",
+            "python",
+            "none"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "then": {
+            "properties": {
+              "profile": {
+                "not": {
+                  "const": "none"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": false
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "then": {
+            "properties": {
+              "profile": {
+                "const": "none"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "container": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "image_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        },
+        "dockerfile": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "build_context": {
+          "$ref": "#/$defs/relativePath"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "then": {
+            "required": [
+              "image_name",
+              "dockerfile",
+              "build_context"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": false
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "image_name"
+                  ]
+                },
+                {
+                  "required": [
+                    "dockerfile"
+                  ]
+                },
+                {
+                  "required": [
+                    "build_context"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "componentInfrastructure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "paths": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/pathPattern"
+          }
+        },
+        "scan_path": {
+          "$ref": "#/$defs/relativePath"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "then": {
+            "required": [
+              "paths",
+              "scan_path"
+            ],
+            "properties": {
+              "paths": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": false
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "paths"
+                  ]
+                },
+                {
+                  "required": [
+                    "scan_path"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "path",
+        "language",
+        "tier",
+        "paths",
+        "build",
+        "container",
+        "infrastructure"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "application",
+            "service",
+            "worker",
+            "library"
+          ]
+        },
+        "path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "language": {
+          "type": "string",
+          "enum": [
+            "dotnet",
+            "java",
+            "node",
+            "javascript",
+            "typescript",
+            "python",
+            "go"
+          ]
+        },
+        "tier": {
+          "type": "integer",
+          "enum": [
+            1,
+            2,
+            3
+          ]
+        },
+        "paths": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/pathPattern"
+          }
+        },
+        "build": {
+          "$ref": "#/$defs/build"
+        },
+        "container": {
+          "$ref": "#/$defs/container"
+        },
+        "infrastructure": {
+          "$ref": "#/$defs/componentInfrastructure"
+        }
+      }
+    },
+    "sharedPath": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "paths",
+        "affects"
+      ],
+      "properties": {
+        "paths": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/pathPattern"
+          }
+        },
+        "affects": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/name"
+          }
+        }
+      }
+    },
+    "repositoryControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "paths": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/pathPattern"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "then": {
+            "required": [
+              "paths"
+            ],
+            "properties": {
+              "paths": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": false
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "paths"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "infrastructureControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "paths": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/pathPattern"
+          }
+        },
+        "scan_path": {
+          "$ref": "#/$defs/relativePath"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "then": {
+            "required": [
+              "paths",
+              "scan_path"
+            ],
+            "properties": {
+              "paths": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": false
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "paths"
+                  ]
+                },
+                {
+                  "required": [
+                    "scan_path"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "repositoryControls": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "github_actions": {
+          "$ref": "#/$defs/repositoryControl"
+        },
+        "infrastructure": {
+          "$ref": "#/$defs/infrastructureControl"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,664 @@
+name: Reusable Node Component CI
+
+on:
+  workflow_call:
+    inputs:
+      component_name:
+        description: "Component name from components.yml"
+        required: true
+        type: string
+
+      component_path:
+        description: "Repository-relative component directory"
+        required: true
+        type: string
+
+      tier:
+        description: "Component Tier: 1, 2 or 3"
+        required: true
+        type: number
+
+      collect_coverage:
+        description: "Require coverage evidence from the test script"
+        required: false
+        type: boolean
+        default: false
+
+      evidence_retention_days:
+        description: "Evidence artifact retention period"
+        required: false
+        type: number
+        default: 30
+
+    outputs:
+      result:
+        description: "Technology CI result"
+        value: ${{ jobs.node-ci.outputs.result }}
+
+      node_version:
+        description: "Node.js version selected from .nvmrc"
+        value: ${{ jobs.node-ci.outputs.node-version }}
+
+      artifact_name:
+        description: "Build artifact name"
+        value: ${{ jobs.node-ci.outputs.artifact-name }}
+
+permissions:
+  contents: read
+
+jobs:
+  node-ci:
+    name: "${{ inputs.component_name }} / Node CI"
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    outputs:
+      result: ${{ steps.outputs.outputs.result }}
+      node-version: ${{ steps.node.outputs.version }}
+      artifact-name: ${{ steps.outputs.outputs.artifact-name }}
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      COMPONENT_NAME: ${{ inputs.component_name }}
+      COMPONENT_PATH: ${{ inputs.component_path }}
+
+      PACKAGE_JSON: ${{ inputs.component_path }}/package.json
+      PACKAGE_LOCK: ${{ inputs.component_path }}/package-lock.json
+      NVMRC_FILE: ${{ inputs.component_path }}/.nvmrc
+
+      RESULTS_DIRECTORY: ${{ github.workspace }}/.ci-results/node
+      TEST_RESULTS_DIRECTORY: ${{ github.workspace }}/.ci-results/node/tests
+      COVERAGE_DIRECTORY: ${{ github.workspace }}/.ci-results/node/coverage
+      BUILD_DIRECTORY: ${{ github.workspace }}/.ci-results/node/build
+
+      CI: "true"
+      NPM_CONFIG_ENGINE_STRICT: "true"
+      NPM_CONFIG_FUND: "false"
+      NPM_CONFIG_AUDIT: "false"
+
+    steps:
+      - name: Validate Node CI inputs
+        env:
+          TIER: ${{ inputs.tier }}
+          RETENTION_DAYS: ${{ inputs.evidence_retention_days }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${COMPONENT_NAME}" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+            echo "::error::Invalid component_name '${COMPONENT_NAME}'."
+            exit 1
+          fi
+
+          if [[ -z "${COMPONENT_PATH}" ]]; then
+            echo "::error::component_path cannot be empty."
+            exit 1
+          fi
+
+          if [[ "${COMPONENT_PATH}" == /* ]]; then
+            echo "::error::component_path must be repository-relative."
+            exit 1
+          fi
+
+          if [[ "${COMPONENT_PATH}" == *".."* ]]; then
+            echo "::error::Parent traversal is not allowed in component_path."
+            exit 1
+          fi
+
+          case "${TIER}" in
+            1|2|3)
+              ;;
+            *)
+              echo "::error::Invalid Tier '${TIER}'."
+              exit 1
+              ;;
+          esac
+
+          if ! [[ "${RETENTION_DAYS}" =~ ^[0-9]+$ ]]; then
+            echo "::error::evidence_retention_days must be numeric."
+            exit 1
+          fi
+
+          if [[ "${RETENTION_DAYS}" -lt 1 || "${RETENTION_DAYS}" -gt 90 ]]; then
+            echo "::error::evidence_retention_days must be between 1 and 90."
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@<APPROVED_FULL_SHA>
+        with:
+          fetch-depth: 0
+
+      - name: Validate component structure
+        run: |
+          set -euo pipefail
+
+          if [[ ! -d "${COMPONENT_PATH}" ]]; then
+            echo "::error::Component directory does not exist: ${COMPONENT_PATH}"
+            exit 1
+          fi
+
+          if [[ ! -f "${NVMRC_FILE}" ]]; then
+            echo "::error::.nvmrc is required: ${NVMRC_FILE}"
+            exit 1
+          fi
+
+          if [[ ! -f "${PACKAGE_JSON}" ]]; then
+            echo "::error::package.json is required: ${PACKAGE_JSON}"
+            exit 1
+          fi
+
+          if [[ ! -f "${PACKAGE_LOCK}" ]]; then
+            echo "::error::package-lock.json is required: ${PACKAGE_LOCK}"
+            echo "::error::Generate it with npm install and commit it."
+            exit 1
+          fi
+
+          if [[ -f "${COMPONENT_PATH}/pnpm-lock.yaml" ]]; then
+            echo "::error::pnpm is not supported by the current Node baseline."
+            exit 1
+          fi
+
+          if [[ -f "${COMPONENT_PATH}/yarn.lock" ]]; then
+            echo "::error::Yarn is not supported by the current Node baseline."
+            exit 1
+          fi
+
+      - name: Validate package contract
+        id: package
+        run: |
+          set -euo pipefail
+
+          python - "${PACKAGE_JSON}" "${PACKAGE_LOCK}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          package_path = Path(sys.argv[1])
+          lock_path = Path(sys.argv[2])
+
+          try:
+              package = json.loads(
+                  package_path.read_text(encoding="utf-8")
+              )
+          except json.JSONDecodeError as error:
+              raise SystemExit(
+                  f"Invalid package.json: {error}"
+              )
+
+          try:
+              lock = json.loads(
+                  lock_path.read_text(encoding="utf-8")
+              )
+          except json.JSONDecodeError as error:
+              raise SystemExit(
+                  f"Invalid package-lock.json: {error}"
+              )
+
+          if not isinstance(package, dict):
+              raise SystemExit(
+                  "package.json must contain a JSON object."
+              )
+
+          if not isinstance(lock, dict):
+              raise SystemExit(
+                  "package-lock.json must contain a JSON object."
+              )
+
+          engines = package.get("engines")
+
+          if not isinstance(engines, dict):
+              raise SystemExit(
+                  "package.json must define engines."
+              )
+
+          node_engine = engines.get("node")
+
+          if (
+              not isinstance(node_engine, str)
+              or not node_engine.strip()
+          ):
+              raise SystemExit(
+                  "package.json must define engines.node."
+              )
+
+          scripts = package.get("scripts")
+
+          if not isinstance(scripts, dict):
+              raise SystemExit(
+                  "package.json must define scripts."
+              )
+
+          required_scripts = (
+              "lint",
+              "test",
+              "build",
+          )
+
+          missing_scripts = [
+              script
+              for script in required_scripts
+              if (
+                  not isinstance(scripts.get(script), str)
+                  or not scripts[script].strip()
+              )
+          ]
+
+          if missing_scripts:
+              raise SystemExit(
+                  "Missing required npm scripts: "
+                  + ", ".join(missing_scripts)
+              )
+
+          lockfile_version = lock.get("lockfileVersion")
+
+          if lockfile_version not in (2, 3):
+              raise SystemExit(
+                  "Unsupported package-lock.json "
+                  f"lockfileVersion: {lockfile_version}. "
+                  "Expected version 2 or 3."
+              )
+
+          package_name = package.get("name", "")
+
+          if not isinstance(package_name, str):
+              package_name = ""
+
+          print(
+              f"Package name: {package_name or '<not-defined>'}"
+          )
+          print(f"Node engine: {node_engine}")
+          print(f"Lockfile version: {lockfile_version}")
+          print("Required npm scripts: lint, test, build")
+          PY
+
+      - name: Resolve Node.js version
+        id: node
+        run: |
+          set -euo pipefail
+
+          NODE_VERSION="$(
+            grep \
+              -v '^[[:space:]]*$' \
+              "${NVMRC_FILE}" \
+              | head -n 1 \
+              | tr -d '[:space:]'
+          )"
+
+          if [[ -z "${NODE_VERSION}" ]]; then
+            echo "::error::.nvmrc cannot be empty."
+            exit 1
+          fi
+
+          if [[ "${NODE_VERSION}" == "node" || "${NODE_VERSION}" == "stable" ]]; then
+            echo "::error::.nvmrc must use a controlled Node.js version."
+            echo "::error::Values such as 'node' and 'stable' are not allowed."
+            exit 1
+          fi
+
+          if [[ "${NODE_VERSION}" == *"*"* || "${NODE_VERSION}" == "latest" ]]; then
+            echo "::error::.nvmrc cannot use wildcard or latest versions."
+            exit 1
+          fi
+
+          if [[ ! "${NODE_VERSION}" =~ ^v?[0-9]+([.][0-9]+){0,2}$ ]]; then
+            echo "::error::Unsupported .nvmrc value '${NODE_VERSION}'."
+            echo "::error::Use a major or exact version, such as 22 or 22.12.0."
+            exit 1
+          fi
+
+          NODE_VERSION="${NODE_VERSION#v}"
+
+          echo "version=${NODE_VERSION}" >> "${GITHUB_OUTPUT}"
+
+          echo "Node.js version from .nvmrc: ${NODE_VERSION}"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@<APPROVED_FULL_SHA>
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+          cache: "npm"
+          cache-dependency-path: ${{ inputs.component_path }}/package-lock.json
+
+      - name: Display Node.js information
+        working-directory: ${{ inputs.component_path }}
+        run: |
+          set -euo pipefail
+
+          echo "Node.js:"
+          node --version
+
+          echo
+          echo "npm:"
+          npm --version
+
+          echo
+          echo "Configured engines.node:"
+
+          node -e "
+            const pkg = require('./package.json');
+            console.log(pkg.engines.node);
+          "
+
+      - name: Validate Node.js engine compatibility
+        working-directory: ${{ inputs.component_path }}
+        run: |
+          set -euo pipefail
+
+            echo "Selected Node.js version:"
+            node --version
+
+            echo "Required engines.node:"
+            node -e "
+            const pkg = require('./package.json');
+            console.log(pkg.engines.node);
+            "
+
+            echo "Compatibility will be enforced by npm ci with engine-strict enabled."
+
+      - name: Prepare evidence directories
+        run: |
+          set -euo pipefail
+
+          mkdir -p \
+            "${RESULTS_DIRECTORY}" \
+            "${TEST_RESULTS_DIRECTORY}" \
+            "${COVERAGE_DIRECTORY}" \
+            "${BUILD_DIRECTORY}"
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.component_path }}
+        run: |
+          set -euo pipefail
+
+          npm ci \
+            --fund=false \
+            --audit=false
+
+      - name: Run lint
+        working-directory: ${{ inputs.component_path }}
+        run: |
+          set -euo pipefail
+
+          npm run lint
+
+      - name: Run tests
+        working-directory: ${{ inputs.component_path }}
+        run: |
+          set -euo pipefail
+
+          npm test
+
+      - name: Collect test evidence
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+
+          CANDIDATE_DIRECTORIES=(
+            "${COMPONENT_PATH}/test-results"
+            "${COMPONENT_PATH}/reports"
+            "${COMPONENT_PATH}/junit"
+          )
+
+          COPIED="false"
+
+          for DIRECTORY in "${CANDIDATE_DIRECTORIES[@]}"; do
+            if [[ -d "${DIRECTORY}" ]]; then
+              cp -R \
+                "${DIRECTORY}/." \
+                "${TEST_RESULTS_DIRECTORY}/"
+
+              COPIED="true"
+            fi
+          done
+
+          if [[ "${COPIED}" == "true" ]]; then
+            echo "Test evidence was collected."
+          else
+            echo "::notice::No standard test-report directory was found."
+          fi
+
+      - name: Collect coverage evidence
+        if: ${{ always() && inputs.collect_coverage }}
+        run: |
+          set -euo pipefail
+
+          CANDIDATE_DIRECTORIES=(
+            "${COMPONENT_PATH}/coverage"
+            "${COMPONENT_PATH}/reports/coverage"
+          )
+
+          COPIED="false"
+
+          for DIRECTORY in "${CANDIDATE_DIRECTORIES[@]}"; do
+            if [[ -d "${DIRECTORY}" ]]; then
+              cp -R \
+                "${DIRECTORY}/." \
+                "${COVERAGE_DIRECTORY}/"
+
+              COPIED="true"
+            fi
+          done
+
+          if [[ "${COPIED}" != "true" ]]; then
+            echo "::error::Coverage collection is enabled, but no coverage directory was found."
+            echo "::error::Expected coverage/ or reports/coverage/ under the component."
+            exit 1
+          fi
+
+          if ! find "${COVERAGE_DIRECTORY}" -type f -print -quit | grep -q .; then
+            echo "::error::Coverage directory does not contain evidence files."
+            exit 1
+          fi
+
+          echo "Coverage evidence was collected."
+
+      - name: Build component
+        working-directory: ${{ inputs.component_path }}
+        run: |
+          set -euo pipefail
+
+          npm run build
+
+      - name: Collect build output
+        run: |
+          set -euo pipefail
+
+          CANDIDATE_DIRECTORIES=(
+            "${COMPONENT_PATH}/dist"
+            "${COMPONENT_PATH}/build"
+            "${COMPONENT_PATH}/out"
+            "${COMPONENT_PATH}/.output"
+          )
+
+          FOUND="false"
+
+          for DIRECTORY in "${CANDIDATE_DIRECTORIES[@]}"; do
+            if [[ -d "${DIRECTORY}" ]]; then
+              DIRECTORY_NAME="$(
+                basename "${DIRECTORY}"
+              )"
+
+              TARGET_DIRECTORY="${BUILD_DIRECTORY}/${DIRECTORY_NAME}"
+
+              mkdir -p "${TARGET_DIRECTORY}"
+
+              cp -R \
+                "${DIRECTORY}/." \
+                "${TARGET_DIRECTORY}/"
+
+              FOUND="true"
+            fi
+          done
+
+          if [[ "${FOUND}" != "true" ]]; then
+            echo "::error::npm run build completed, but no supported build directory was found."
+            echo "::error::Expected one of: dist, build, out, .output."
+            exit 1
+          fi
+
+      - name: Generate Node CI metadata
+        if: ${{ always() }}
+        env:
+          TIER: ${{ inputs.tier }}
+          NODE_VERSION: ${{ steps.node.outputs.version }}
+          COLLECT_COVERAGE: ${{ inputs.collect_coverage }}
+          REPOSITORY: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          package_path = (
+              Path(os.environ["COMPONENT_PATH"])
+              / "package.json"
+          )
+
+          package = {}
+
+          if package_path.is_file():
+              package = json.loads(
+                  package_path.read_text(
+                      encoding="utf-8"
+                  )
+              )
+
+          metadata = {
+              "schema_version": 1,
+              "repository": os.environ["REPOSITORY"],
+              "commit_sha": os.environ["COMMIT_SHA"],
+              "component": {
+                  "name": os.environ["COMPONENT_NAME"],
+                  "path": os.environ["COMPONENT_PATH"],
+                  "tier": int(os.environ["TIER"]),
+              },
+              "node": {
+                  "version": os.environ["NODE_VERSION"],
+                  "version_source": ".nvmrc",
+                  "package_manager": "npm",
+                  "install_command": "npm ci",
+                  "package_name": package.get("name", ""),
+                  "package_version": package.get(
+                      "version",
+                      "",
+                  ),
+                  "engines_node": (
+                      package.get(
+                          "engines",
+                          {},
+                      ).get(
+                          "node",
+                          "",
+                      )
+                  ),
+                  "lock_file": "package-lock.json",
+                  "scripts": {
+                      "lint": "npm run lint",
+                      "test": "npm test",
+                      "build": "npm run build",
+                  },
+                  "collect_coverage": (
+                      os.environ[
+                          "COLLECT_COVERAGE"
+                      ].lower()
+                      == "true"
+                  ),
+              },
+              "workflow": {
+                  "run_id": os.environ["RUN_ID"],
+                  "run_attempt": os.environ["RUN_ATTEMPT"],
+                  "job_status": os.environ["JOB_STATUS"],
+              },
+          }
+
+          output = (
+              Path(os.environ["RESULTS_DIRECTORY"])
+              / "node-ci-metadata.json"
+          )
+
+          output.parent.mkdir(
+              parents=True,
+              exist_ok=True,
+          )
+
+          output.write_text(
+              json.dumps(
+                  metadata,
+                  indent=2,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload Node CI evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@<APPROVED_FULL_SHA>
+        with:
+          name: ${{ inputs.component_name }}-node-ci-evidence
+          retention-days: ${{ inputs.evidence_retention_days }}
+          if-no-files-found: warn
+          path: |
+            .ci-results/node/node-ci-metadata.json
+            .ci-results/node/tests/**
+            .ci-results/node/coverage/**
+
+      - name: Upload Node build artifact
+        if: ${{ success() }}
+        uses: actions/upload-artifact@<APPROVED_FULL_SHA>
+        with:
+          name: ${{ inputs.component_name }}-node-build
+          retention-days: ${{ inputs.evidence_retention_days }}
+          if-no-files-found: error
+          path: |
+            .ci-results/node/build/**
+
+      - name: Expose Node CI outputs
+        id: outputs
+        if: ${{ success() }}
+        env:
+          ARTIFACT_NAME: ${{ inputs.component_name }}-node-build
+        run: |
+          set -euo pipefail
+
+          echo "result=PASS" >> "${GITHUB_OUTPUT}"
+          echo "artifact-name=${ARTIFACT_NAME}" >> "${GITHUB_OUTPUT}"
+
+      - name: Generate Node CI summary
+        if: ${{ always() }}
+        env:
+          TIER: ${{ inputs.tier }}
+          NODE_VERSION: ${{ steps.node.outputs.version }}
+          COLLECT_COVERAGE: ${{ inputs.collect_coverage }}
+        run: |
+          {
+            echo "## Node Component CI"
+            echo
+            echo "| Configuration | Value |"
+            echo "|---|---|"
+            echo "| Component | \`${COMPONENT_NAME}\` |"
+            echo "| Component path | \`${COMPONENT_PATH}\` |"
+            echo "| Tier | ${TIER} |"
+            echo "| Node.js | \`${NODE_VERSION}\` |"
+            echo "| Node version source | \`.nvmrc\` |"
+            echo "| Package manager | npm |"
+            echo "| Lock file | \`package-lock.json\` |"
+            echo "| Install | \`npm ci\` |"
+            echo "| Engine strict | Enabled |"
+            echo "| Lint | \`npm run lint\` |"
+            echo "| Tests | \`npm test\` |"
+            echo "| Build | \`npm run build\` |"
+            echo "| Coverage required | ${COLLECT_COVERAGE} |"
+          } >> "${GITHUB_STEP_SUMMARY}"

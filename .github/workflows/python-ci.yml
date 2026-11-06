@@ -1,0 +1,936 @@
+name: Reusable Python Component CI
+
+on:
+  workflow_call:
+    inputs:
+      component_name:
+        description: "Component name from components.yml"
+        required: true
+        type: string
+
+      component_path:
+        description: "Repository-relative component directory"
+        required: true
+        type: string
+
+      tier:
+        description: "Component Tier: 1, 2 or 3"
+        required: true
+        type: number
+
+      require_tests:
+        description: "Require Pytest test evidence"
+        required: false
+        type: boolean
+        default: true
+
+      collect_coverage:
+        description: "Require XML coverage evidence"
+        required: false
+        type: boolean
+        default: true
+
+      evidence_retention_days:
+        description: "Evidence artifact retention period"
+        required: false
+        type: number
+        default: 30
+
+    outputs:
+      result:
+        description: "Technology CI result"
+        value: ${{ jobs.python-ci.outputs.result }}
+
+      python_version:
+        description: "Python version selected from .python-version"
+        value: ${{ jobs.python-ci.outputs.python-version }}
+
+      artifact_name:
+        description: "Python build artifact name"
+        value: ${{ jobs.python-ci.outputs.artifact-name }}
+
+permissions:
+  contents: read
+
+jobs:
+  python-ci:
+    name: "${{ inputs.component_name }} / Python CI"
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    outputs:
+      result: ${{ steps.outputs.outputs.result }}
+      python-version: ${{ steps.python.outputs.version }}
+      artifact-name: ${{ steps.outputs.outputs.artifact-name }}
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      COMPONENT_NAME: ${{ inputs.component_name }}
+      COMPONENT_PATH: ${{ inputs.component_path }}
+
+      PYTHON_VERSION_FILE: ${{ inputs.component_path }}/.python-version
+      PYPROJECT_FILE: ${{ inputs.component_path }}/pyproject.toml
+      REQUIREMENTS_FILE: ${{ inputs.component_path }}/requirements.txt
+      DEV_REQUIREMENTS_FILE: ${{ inputs.component_path }}/requirements-dev.txt
+
+      RESULTS_DIRECTORY: ${{ github.workspace }}/.ci-results/python
+      TEST_RESULTS_DIRECTORY: ${{ github.workspace }}/.ci-results/python/tests
+      COVERAGE_DIRECTORY: ${{ github.workspace }}/.ci-results/python/coverage
+      BUILD_DIRECTORY: ${{ github.workspace }}/.ci-results/python/build
+
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_INPUT: "1"
+
+    steps:
+      - name: Validate Python CI inputs
+        env:
+          TIER: ${{ inputs.tier }}
+          RETENTION_DAYS: ${{ inputs.evidence_retention_days }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${COMPONENT_NAME}" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+            echo "::error::Invalid component_name '${COMPONENT_NAME}'."
+            exit 1
+          fi
+
+          if [[ -z "${COMPONENT_PATH}" ]]; then
+            echo "::error::component_path cannot be empty."
+            exit 1
+          fi
+
+          if [[ "${COMPONENT_PATH}" == /* ]]; then
+            echo "::error::component_path must be repository-relative."
+            exit 1
+          fi
+
+          if [[ "${COMPONENT_PATH}" == *".."* ]]; then
+            echo "::error::Parent traversal is not allowed in component_path."
+            exit 1
+          fi
+
+          case "${TIER}" in
+            1|2|3)
+              ;;
+            *)
+              echo "::error::Invalid Tier '${TIER}'."
+              exit 1
+              ;;
+          esac
+
+          if ! [[ "${RETENTION_DAYS}" =~ ^[0-9]+$ ]]; then
+            echo "::error::evidence_retention_days must be numeric."
+            exit 1
+          fi
+
+          if [[ "${RETENTION_DAYS}" -lt 1 || "${RETENTION_DAYS}" -gt 90 ]]; then
+            echo "::error::evidence_retention_days must be between 1 and 90."
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@<APPROVED_FULL_SHA>
+        with:
+          fetch-depth: 0
+
+      - name: Validate Python component structure
+        run: |
+          set -euo pipefail
+
+          if [[ ! -d "${COMPONENT_PATH}" ]]; then
+            echo "::error::Component directory does not exist: ${COMPONENT_PATH}"
+            exit 1
+          fi
+
+          REQUIRED_FILES=(
+            "${PYTHON_VERSION_FILE}"
+            "${PYPROJECT_FILE}"
+            "${REQUIREMENTS_FILE}"
+            "${DEV_REQUIREMENTS_FILE}"
+          )
+
+          for FILE in "${REQUIRED_FILES[@]}"; do
+            if [[ ! -f "${FILE}" ]]; then
+              echo "::error::Required Python component file does not exist: ${FILE}"
+              exit 1
+            fi
+
+            if [[ ! -s "${FILE}" ]]; then
+              echo "::error::Required Python component file is empty: ${FILE}"
+              exit 1
+            fi
+          done
+
+          UNSUPPORTED_FILES=(
+            "${COMPONENT_PATH}/poetry.lock"
+            "${COMPONENT_PATH}/Pipfile.lock"
+            "${COMPONENT_PATH}/uv.lock"
+          )
+
+          for FILE in "${UNSUPPORTED_FILES[@]}"; do
+            if [[ -f "${FILE}" ]]; then
+              echo "::error::Unsupported Python dependency manager file detected: ${FILE}"
+              echo "::error::The current baseline supports pip requirements with SHA-256 hashes."
+              exit 1
+            fi
+          done
+
+      - name: Resolve Python version
+        id: python
+        run: |
+          set -euo pipefail
+
+          PYTHON_VERSION="$(
+            grep \
+              -v '^[[:space:]]*$' \
+              "${PYTHON_VERSION_FILE}" \
+              | head -n 1 \
+              | tr -d '[:space:]'
+          )"
+
+          if [[ -z "${PYTHON_VERSION}" ]]; then
+            echo "::error::.python-version cannot be empty."
+            exit 1
+          fi
+
+          if [[ "${PYTHON_VERSION}" == "latest" ]]; then
+            echo "::error::.python-version cannot use latest."
+            exit 1
+          fi
+
+          if [[ "${PYTHON_VERSION}" == *"*"* ]]; then
+            echo "::error::.python-version cannot contain wildcards."
+            exit 1
+          fi
+
+          if [[ ! "${PYTHON_VERSION}" =~ ^[0-9]+[.][0-9]+([.][0-9]+)?$ ]]; then
+            echo "::error::Unsupported .python-version value '${PYTHON_VERSION}'."
+            echo "::error::Use a version such as 3.13 or 3.13.1."
+            exit 1
+          fi
+
+          echo "version=${PYTHON_VERSION}" >> "${GITHUB_OUTPUT}"
+
+          echo "Python version from .python-version: ${PYTHON_VERSION}"
+
+      - name: Validate requirements files
+        run: |
+          set -euo pipefail
+
+          python - \
+            "${REQUIREMENTS_FILE}" \
+            "${DEV_REQUIREMENTS_FILE}" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          HASH_PATTERN = re.compile(
+              r"--hash=sha256:[a-fA-F0-9]{64}"
+          )
+
+          DIRECT_REFERENCE_PATTERN = re.compile(
+              r"(^|\s)(git\+|https?://|file:|[A-Za-z]:\\)"
+          )
+
+          OPEN_VERSION_PATTERN = re.compile(
+              r"(^|[^=])(?:>=|<=|~=|!=|>|<|\^)"
+          )
+
+          EDITABLE_PATTERN = re.compile(
+              r"(^|\s)(-e|--editable)(\s|=)"
+          )
+
+          ALLOWED_OPTIONS = (
+              "--index-url",
+              "--extra-index-url",
+              "--trusted-host",
+              "--find-links",
+              "--only-binary",
+              "--prefer-binary",
+              "--no-binary",
+              "-r",
+              "--requirement",
+              "-c",
+              "--constraint",
+          )
+
+          def logical_entries(path: Path) -> list[str]:
+              entries: list[str] = []
+              buffer = ""
+
+              for raw_line in path.read_text(
+                  encoding="utf-8"
+              ).splitlines():
+                  stripped = raw_line.strip()
+
+                  if not stripped:
+                      continue
+
+                  if stripped.startswith("#"):
+                      continue
+
+                  if stripped.endswith("\\"):
+                      buffer += stripped[:-1].strip() + " "
+                      continue
+
+                  entry = (buffer + stripped).strip()
+                  buffer = ""
+
+                  if entry:
+                      entries.append(entry)
+
+              if buffer:
+                  entries.append(buffer.strip())
+
+              return entries
+
+          errors: list[str] = []
+
+          for raw_path in sys.argv[1:]:
+              path = Path(raw_path)
+              entries = logical_entries(path)
+
+              if not entries:
+                  errors.append(
+                      f"{path}: no requirements were found."
+                  )
+                  continue
+
+              requirement_count = 0
+
+              for entry in entries:
+                  if entry.startswith(ALLOWED_OPTIONS):
+                      continue
+
+                  requirement_count += 1
+
+                  if EDITABLE_PATTERN.search(entry):
+                      errors.append(
+                          f"{path}: editable requirements are prohibited: "
+                          f"{entry}"
+                      )
+
+                  if DIRECT_REFERENCE_PATTERN.search(entry):
+                      errors.append(
+                          f"{path}: direct URL, VCS or local references "
+                          f"are prohibited: {entry}"
+                      )
+
+                  requirement_part = entry.split(
+                      "--hash=",
+                      1,
+                  )[0].strip()
+
+                  if "==" not in requirement_part:
+                      errors.append(
+                          f"{path}: exact version pin is required: "
+                          f"{entry}"
+                      )
+
+                  if OPEN_VERSION_PATTERN.search(
+                      requirement_part
+                  ):
+                      errors.append(
+                          f"{path}: open version ranges are prohibited: "
+                          f"{entry}"
+                      )
+
+                  if not HASH_PATTERN.search(entry):
+                      errors.append(
+                          f"{path}: SHA-256 hash is required: "
+                          f"{entry}"
+                      )
+
+                  hashes = HASH_PATTERN.findall(entry)
+
+                  if not hashes:
+                      errors.append(
+                          f"{path}: no valid SHA-256 hash was found: "
+                          f"{entry}"
+                      )
+
+              if requirement_count == 0:
+                  errors.append(
+                      f"{path}: no package requirements were found."
+                  )
+
+          if errors:
+              raise SystemExit(
+                  "\n".join(errors)
+              )
+
+          print(
+              "Requirements policy validation: PASS"
+          )
+          PY
+
+      - name: Set up Python
+        uses: actions/setup-python@<APPROVED_FULL_SHA>
+        with:
+          python-version: ${{ steps.python.outputs.version }}
+          cache: "pip"
+          cache-dependency-path: |
+            ${{ inputs.component_path }}/requirements.txt
+            ${{ inputs.component_path }}/requirements-dev.txt
+
+      - name: Display Python information
+        working-directory: ${{ inputs.component_path }}
+        run: |
+          set -euo pipefail
+
+          python --version
+          python -m pip --version
+
+          echo
+          echo "Python executable:"
+          python -c "import sys; print(sys.executable)"
+
+      - name: Validate resolved Python version
+        env:
+          REQUESTED_VERSION: ${{ steps.python.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          python - "${REQUESTED_VERSION}" <<'PY'
+          import sys
+
+          requested = sys.argv[1].split(".")
+
+          actual = [
+              str(sys.version_info.major),
+              str(sys.version_info.minor),
+              str(sys.version_info.micro),
+          ]
+
+          if actual[:len(requested)] != requested:
+              raise SystemExit(
+                  "Resolved Python version does not match "
+                  f".python-version. Requested={'.'.join(requested)}, "
+                  f"Actual={'.'.join(actual)}"
+              )
+
+          print(
+              "Python runtime validation: PASS"
+          )
+          PY
+
+      - name: Prepare evidence directories
+        run: |
+          set -euo pipefail
+
+          mkdir -p \
+            "${RESULTS_DIRECTORY}" \
+            "${TEST_RESULTS_DIRECTORY}" \
+            "${COVERAGE_DIRECTORY}" \
+            "${BUILD_DIRECTORY}"
+
+      - name: Install locked dependencies
+        working-directory: ${{ inputs.component_path }}
+        run: |
+          set -euo pipefail
+
+          python -m pip install \
+            --require-hashes \
+            --only-binary=:all: \
+            -r requirements.txt \
+            -r requirements-dev.txt
+
+      - name: Validate required development tools
+        working-directory: ${{ inputs.component_path }}
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import importlib.util
+
+          required_modules = {
+              "ruff": "ruff",
+              "pytest": "pytest",
+              "pytest-cov": "pytest_cov",
+              "build": "build",
+          }
+
+          missing = [
+              package
+              for package, module in required_modules.items()
+              if importlib.util.find_spec(module) is None
+          ]
+
+          if missing:
+              raise SystemExit(
+                  "Missing required development tools: "
+                  + ", ".join(missing)
+              )
+
+          print(
+              "Required Python development tools: PASS"
+          )
+          PY
+
+      - name: Validate pyproject.toml
+        working-directory: ${{ inputs.component_path }}
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          path = Path("pyproject.toml")
+
+          with path.open("rb") as file:
+              document = tomllib.load(file)
+
+          build_system = document.get(
+              "build-system"
+          )
+
+          if not isinstance(build_system, dict):
+              raise SystemExit(
+                  "pyproject.toml must define build-system."
+              )
+
+          requires = build      "requires"
+          )
+
+          backend = build_system.get(
+              "build-backend"
+          )
+
+          if (
+              not isinstance(requires, list)
+              or not requires
+          ):
+              raise SystemExit(
+                  "pyproject.toml build-system.requires "
+                  "must be a non-empty array."
+              )
+
+          if (
+              not isinstance(backend, str)
+              or not backend.strip()
+          ):
+              raise SystemExit(
+                  "pyproject.toml must define "
+                  "build-system.build-backend."
+              )
+
+          project = document.get(
+              "project"
+          )
+
+          if not isinstance(project, dict):
+              raise SystemExit(
+                  "pyproject.toml must define project metadata."
+              )
+
+          name = project.get(
+              "name"
+          )
+
+          if not isinstance(name, str) or not name.strip():
+              raise SystemExit(
+                  "pyproject.toml project.name is required."
+              )
+
+          requires_python = project.get(
+              "requires-python"
+          )
+
+          if (
+              not isinstance(requires_python, str)
+              or not requires_python.strip()
+          ):
+              raise SystemExit(
+                  "pyproject.toml project.requires-python "
+                  "is required."
+              )
+
+          print(f"Project: {name}")
+          print(f"Build backend: {backend}")
+          print(f"Requires Python: {requires_python}")
+          PY
+
+      - name: Run Ruff
+        working-directory: ${{ inputs.component_path }}
+        run: |
+          set -euo pipefail
+
+          python -m ruff check \
+            --output-format=github \
+            .
+
+      - name: Run Pytest with coverage
+        if: ${{ inputs.collect_coverage }}
+        working-directory: ${{ inputs.component_path }}
+        run: |
+          set -euo pipefail
+
+          python -m pytest \
+            --junitxml="${TEST_RESULTS_DIRECTORY}/pytest.xml" \
+            --cov=. \
+            --cov-report=term-missing \
+            --cov-report="xml:${COVERAGE_DIRECTORY}/coverage.xml"
+
+      - name: Run Pytest without coverage
+        if: ${{ !inputs.collect_coverage }}
+        working-directory: ${{ inputs.component_path }}
+        run: |
+          set -euo pipefail
+
+          python -m pytest \
+            --junitxml="${TEST_RESULTS_DIRECTORY}/pytest.xml"
+
+      - name: Validate test evidence
+        if: ${{ inputs.require_tests }}
+        run: |
+          set -euo pipefail
+
+          TEST_REPORT="${TEST_RESULTS_DIRECTORY}/pytest.xml"
+
+          if [[ ! -s "${TEST_REPORT}" ]]; then
+            echo "::error::Tests are required, but pytest.xml was not generated."
+            exit 1
+          fi
+
+          python - "${TEST_REPORT}" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+
+          try:
+              root = ET.parse(path).getroot()
+          except ET.ParseError as error:
+              raise SystemExit(
+                  f"Invalid Pytest JUnit XML: {error}"
+              )
+
+          tests = 0
+
+          if root.tag == "testsuite":
+              tests += int(
+                  root.attrib.get(
+                      "tests",
+                      "0",
+                  )
+              )
+          elif root.tag == "testsuites":
+              for suite in root.findall(
+                  "testsuite"
+              ):
+                  tests += int(
+                      suite.attrib.get(
+                          "tests",
+                          "0",
+                      )
+                  )
+
+          if tests < 1:
+              raise SystemExit(
+                  "Tests are required, but Pytest "
+                  "reported zero tests."
+              )
+
+          print(
+              f"Pytest test count: {tests}"
+          )
+          PY
+
+      - name: Validate coverage evidence
+        if: ${{ inputs.collect_coverage }}
+        run: |
+          set -euo pipefail
+
+          COVERAGE_REPORT="${COVERAGE_DIRECTORY}/coverage.xml"
+
+          if [[ ! -s "${COVERAGE_REPORT}" ]]; then
+            echo "::error::Coverage is required, but coverage.xml was not generated."
+            exit 1
+          fi
+
+          python - "${COVERAGE_REPORT}" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+
+          try:
+              root = ET.parse(path).getroot()
+          except ET.ParseError as error:
+              raise SystemExit(
+                  f"Invalid coverage XML: {error}"
+              )
+
+          if root.tag != "coverage":
+              raise SystemExit(
+                  "Unexpected coverage XML root element: "
+                  f"{root.tag}"
+              )
+
+          line_rate = root.attrib.get(
+              "line-rate"
+          )
+
+          if line_rate is None:
+              raise SystemExit(
+                  "Coverage XML does not define line-rate."
+              )
+
+          print(
+              f"Coverage line rate: {line_rate}"
+          )
+          PY
+
+      - name: Build Python distribution
+        working-directory: ${{ inputs.component_path }}
+        run: |
+          set -euo pipefail
+
+          rm -rf dist build
+
+          python -m build \
+            --outdir "${BUILD_DIRECTORY}"
+
+      - name: Validate Python build artifacts
+        run: |
+          set -euo pipefail
+
+          mapfile -t WHEELS < <(
+            find "${BUILD_DIRECTORY}" \
+              -maxdepth 1 \
+              -type f \
+              -name "*.whl" \
+              | sort
+          )
+
+          mapfile -t SOURCE_DISTRIBUTIONS < <(
+            find "${BUILD_DIRECTORY}" \
+              -maxdepth 1 \
+              -type f \
+              -name "*.tar.gz" \
+              | sort
+          )
+
+          if [[ "${#WHEELS[@]}" -eq 0 ]]; then
+            echo "::error::Python build did not produce a wheel."
+            exit 1
+          fi
+
+          if [[ "${#SOURCE_DISTRIBUTIONS[@]}" -eq 0 ]]; then
+            echo "::error::Python build did not produce a source distribution."
+            exit 1
+          fi
+
+          echo "Wheels: ${#WHEELS[@]}"
+          echo "Source distributions: ${#SOURCE_DISTRIBUTIONS[@]}"
+
+          printf '%s\n' "${WHEELS[@]}"
+          printf '%s\n' "${SOURCE_DISTRIBUTIONS[@]}"
+
+      - name: Validate built wheel
+        run: |
+          set -euo pipefail
+
+          WHEEL="$(
+            find "${BUILD_DIRECTORY}" \
+              -maxdepth 1 \
+              -type f \
+              -name "*.whl" \
+              | sort \
+              | head -n 1
+          )"
+
+          if [[ -z "${WHEEL}" ]]; then
+            echo "::error::Unable to locate the built wheel."
+            exit 1
+          fi
+
+          python -m zipfile \
+            --test \
+            "${WHEEL}"
+
+      - name: Generate Python CI metadata
+        if: ${{ always() }}
+        env:
+          TIER: ${{ inputs.tier }}
+          PYTHON_VERSION: ${{ steps.python.outputs.version }}
+          REQUIRE_TESTS: ${{ inputs.require_tests }}
+          COLLECT_COVERAGE: ${{ inputs.collect_coverage }}
+          REPOSITORY: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p "${RESULTS_DIRECTORY}"
+
+          python - <<'PY'
+          import json
+          import os
+          import tomllib
+          from pathlib import Path
+
+          component_path = Path(
+              os.environ["COMPONENT_PATH"]
+          )
+
+          pyproject_path = (
+              component_path
+              / "pyproject.toml"
+          )
+
+          project = {}
+
+          if pyproject_path.is_file():
+              with pyproject_path.open(
+                  "rb"
+              ) as file:
+                  document = tomllib.load(file)
+
+              project = document.get(
+                  "project",
+                  {},
+              )
+
+          metadata = {
+              "schema_version": 1,
+              "repository": os.environ["REPOSITORY"],
+              "commit_sha": os.environ["COMMIT_SHA"],
+              "component": {
+                  "name": os.environ["COMPONENT_NAME"],
+                  "path": os.environ["COMPONENT_PATH"],
+                  "tier": int(os.environ["TIER"]),
+              },
+              "python": {
+                  "version": os.environ["PYTHON_VERSION"],
+                  "version_source": ".python-version",
+                  "package_manager": "pip",
+                  "requirements": [
+                      "requirements.txt",
+                      "requirements-dev.txt",
+                  ],
+                  "require_hashes": True,
+                  "only_binary": True,
+                  "lint": "python -m ruff check .",
+                  "tests": "python -m pytest",
+                  "build": "python -m build",
+                  "project_name": project.get(
+                      "name",
+                      "",
+                  ),
+                  "project_version": project.get(
+                      "version",
+                      "",
+                  ),
+                  "requires_python": project.get(
+                      "requires-python",
+                      "",
+                  ),
+                  "require_tests": (
+                      os.environ[
+                          "REQUIRE_TESTS"
+                      ].lower()
+                      == "true"
+                  ),
+                  "collect_coverage": (
+                      os.environ[
+                          "COLLECT_COVERAGE"
+                      ].lower()
+                      == "true"
+                  ),
+              },
+              "workflow": {
+                  "run_id": os.environ["RUN_ID"],
+                  "run_attempt": os.environ["RUN_ATTEMPT"],
+                  "job_status": os.environ["JOB_STATUS"],
+              },
+          }
+
+          output = (
+              Path(os.environ["RESULTS_DIRECTORY"])
+              / "python-ci-metadata.json"
+          )
+
+          output.write_text(
+              json.dumps(
+                  metadata,
+                  indent=2,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload Python CI evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@<APPROVED_FULL_SHA>
+        with:
+          name: ${{ inputs.component_name }}-python-ci-evidence
+          retention-days: ${{ inputs.evidence_retention_days }}
+          if-no-files-found: warn
+          path: |
+            .ci-results/python/python-ci-metadata.json
+            .ci-results/python/tests/**
+            .ci-results/python/coverage/**
+
+      - name: Upload Python build artifacts
+        if: ${{ success() }}
+        uses: actions/upload-artifact@<APPROVED_FULL_SHA>
+        with:
+          name: ${{ inputs.component_name }}-python-build
+          retention-days: ${{ inputs.evidence_retention_days }}
+          if-no-files-found: error
+          path: |
+            .ci-results/python/build/**
+
+      - name: Expose Python CI outputs
+        id: outputs
+        if: ${{ success() }}
+        env:
+          ARTIFACT_NAME: ${{ inputs.component_name }}-python-build
+        run: |
+          set -euo pipefail
+
+          echo "result=PASS" >> "${GITHUB_OUTPUT}"
+          echo "artifact-name=${ARTIFACT_NAME}" >> "${GITHUB_OUTPUT}"
+
+      - name: Generate Python CI summary
+        if: ${{ always() }}
+        env:
+          TIER: ${{ inputs.tier }}
+          PYTHON_VERSION: ${{ steps.python.outputs.version }}
+          REQUIRE_TESTS: ${{ inputs.require_tests }}
+          COLLECT_COVERAGE: ${{ inputs.collect_coverage }}
+        run: |
+          {
+            echo "## Python Component CI"
+            echo
+            echo "| Configuration | Value |"
+            echo "|---|---|"
+            echo "| Component | \`${COMPONENT_NAME}\` |"
+            echo "| Component path | \`${COMPONENT_PATH}\` |"
+            echo "| Tier | ${TIER} |"
+            echo "| Python | \`${PYTHON_VERSION}\` |"
+            echo "| Version source | \`.python-version\` |"
+            echo "| Package manager | pip |"
+            echo "| Requirements hashes | Required |"
+            echo "| Binary distributions | Required |"
+            echo "| Lint | \`python -m ruff check .\` |"
+            echo "| Tests required | ${REQUIRE_TESTS} |"
+            echo "| Coverage required | ${COLLECT_COVERAGE} |"
+            echo "| Build | \`python -m build\` |"
+          } >> "${GITHUB_STEP_SUMMARY}"

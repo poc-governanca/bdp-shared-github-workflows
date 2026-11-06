@@ -1,0 +1,760 @@
+name: Reusable Component CI
+
+on:
+  workflow_call:
+    inputs:
+      component_name:
+        description: "Component name"
+        required: true
+        type: string
+
+      component_type:
+        description: "Component type"
+        required: true
+        type: string
+
+      component_path:
+        description: "Repository-relative component path"
+        required: true
+        type: string
+
+      language:
+        description: "Primary component language"
+        required: true
+        type: string
+
+      tier:
+        description: "Component Tier: 1, 2 or 3"
+        required: true
+        type: number
+
+      application_changed:
+        description: "Application code was affected"
+        required: true
+        type: boolean
+
+      build_enabled:
+        description: "Technology build is enabled"
+        required: true
+        type: boolean
+
+      build_profile:
+        description: "Approved technology build profile"
+        required: true
+        type: string
+
+      container_enabled:
+        description: "Component produces a container image"
+        required: true
+        type: boolean
+
+      image_name:
+        description: "Logical container image name"
+        required: false
+        type: string
+        default: ""
+
+      dockerfile:
+        description: "Repository-relative Dockerfile path"
+        required: false
+        type: string
+        default: ""
+
+      build_context:
+        description: "Repository-relative container build context"
+        required: false
+        type: string
+        default: ""
+
+      infrastructure_enabled:
+        description: "Component contains Infrastructure as Code"
+        required: true
+        type: boolean
+
+      infrastructure_changed:
+        description: "Component Infrastructure as Code was affected"
+        required: true
+        type: boolean
+
+      infrastructure_scan_path:
+        description: "Repository-relative component IaC scan path"
+        required: false
+        type: string
+        default: ""
+
+      execution_mode:
+        description: "Execution mode: validation or full"
+        required: false
+        type: string
+        default: "full"
+
+      tooling_ref:
+        description: "Shared tooling release or commit SHA"
+        required: false
+        type: string
+        default: "v1"
+
+    outputs:
+      result:
+        description: "Final component result"
+        value: ${{ jobs.component-gate.outputs.result }}
+
+      image_ref:
+        description: "Tagged image reference"
+        value: ${{ jobs.component-gate.outputs.image-ref }}
+
+      image_digest:
+        description: "Immutable image digest"
+        value: ${{ jobs.component-gate.outputs.image-digest }}
+
+      image_uri:
+        description: "Immutable image URI"
+        value: ${{ jobs.component-gate.outputs.image-uri }}
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: "${{ inputs.component_name }} / Validate"
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Validate component configuration
+        shell: bash
+        env:
+          COMPONENT_NAME: ${{ inputs.component_name }}
+          COMPONENT_TYPE: ${{ inputs.component_type }}
+          COMPONENT_PATH: ${{ inputs.component_path }}
+          LANGUAGE: ${{ inputs.language }}
+          TIER: ${{ inputs.tier }}
+          APPLICATION_CHANGED: ${{ inputs.application_changed }}
+          BUILD_ENABLED: ${{ inputs.build_enabled }}
+          BUILD_PROFILE: ${{ inputs.build_profile }}
+          CONTAINER_ENABLED: ${{ inputs.container_enabled }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          BUILD_CONTEXT: ${{ inputs.build_context }}
+          INFRASTRUCTURE_ENABLED: ${{ inputs.infrastructure_enabled }}
+          INFRASTRUCTURE_CHANGED: ${{ inputs.infrastructure_changed }}
+          INFRASTRUCTURE_SCAN_PATH: ${{ inputs.infrastructure_scan_path }}
+          EXECUTION_MODE: ${{ inputs.execution_mode }}
+          TOOLING_REF: ${{ inputs.tooling_ref }}
+        run: |
+          set -euo pipefail
+
+          validate_path() {
+            local field_name="$1"
+            local field_value="$2"
+
+            if [[ -z "${field_value}" ]]; then
+              echo "::error::${field_name} cannot be empty."
+              exit 1
+            fi
+
+            if [[ "${field_value}" == /* ]]; then
+              echo "::error::${field_name} must be repository-relative."
+              exit 1
+            fi
+
+            if [[ \
+              "${field_value}" == ".." \
+              || "${field_value}" == ../* \
+              || "${field_value}" == */../* \
+              || "${field_value}" == */.. \
+            ]]; then
+              echo "::error::Parent traversal is not allowed in ${field_name}."
+              exit 1
+            fi
+          }
+
+          if [[ ! "${COMPONENT_NAME}" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+            echo "::error::Invalid component_name '${COMPONENT_NAME}'."
+            exit 1
+          fi
+
+          case "${COMPONENT_TYPE}" in
+            application|service|worker|library)
+              ;;
+            *)
+              echo "::error::Unsupported component_type '${COMPONENT_TYPE}'."
+              exit 1
+              ;;
+          esac
+
+          validate_path "component_path" "${COMPONENT_PATH}"
+
+          case "${TIER}" in
+            1|2|3)
+              ;;
+            *)
+              echo "::error::Invalid Tier '${TIER}'."
+              exit 1
+              ;;
+          esac
+
+          case "${EXECUTION_MODE}" in
+            validation|full)
+              ;;
+            *)
+              echo "::error::Invalid execution_mode '${EXECUTION_MODE}'."
+              exit 1
+              ;;
+          esac
+
+          case "${LANGUAGE}" in
+            dotnet|java|node|javascript|typescript|python|go)
+              ;;
+            *)
+              echo "::error::Unsupported language '${LANGUAGE}'."
+              exit 1
+              ;;
+          esac
+
+          case "${BUILD_PROFILE}" in
+            dotnet|java|node|python|none)
+              ;;
+            *)
+              echo "::error::Unsupported build_profile '${BUILD_PROFILE}'."
+              exit 1
+              ;;
+          esac
+
+          if [[ "${BUILD_ENABLED}" == "true" && "${BUILD_PROFILE}" == "none" ]]; then
+            echo "::error::An enabled build cannot use profile 'none'."
+            exit 1
+          fi
+
+          if [[ "${BUILD_ENABLED}" == "false" && "${BUILD_PROFILE}" != "none" ]]; then
+            echo "::error::A disabled build must use profile 'none'."
+            exit 1
+          fi
+
+          if [[ "${BUILD_ENABLED}" == "true" ]]; then
+            case "${LANGUAGE}:${BUILD_PROFILE}" in
+              dotnet:dotnet)
+                ;;
+              java:java)
+                ;;
+              node:node|javascript:node|typescript:node)
+                ;;
+              python:python)
+                ;;
+              *)
+                echo "::error::Language '${LANGUAGE}' is incompatible with '${BUILD_PROFILE}'."
+                exit 1
+                ;;
+            esac
+          fi
+
+          if [[ "${LANGUAGE}" == "go" && "${BUILD_ENABLED}" == "true" ]]; then
+            echo "::error::Go build is not supported until go-ci.yml exists."
+            exit 1
+          fi
+
+          if [[ "${CONTAINER_ENABLED}" == "true" ]]; then
+            if [[ ! "${IMAGE_NAME}" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+              echo "::error::Invalid image_name '${IMAGE_NAME}'."
+              exit 1
+            fi
+
+            validate_path "dockerfile" "${DOCKERFILE}"
+            validate_path "build_context" "${BUILD_CONTEXT}"
+          else
+            if [[ -n "${IMAGE_NAME}" || -n "${DOCKERFILE}" || -n "${BUILD_CONTEXT}" ]]; then
+              echo "::error::Container fields must be empty when container is disabled."
+              exit 1
+            fi
+          fi
+
+          if [[ "${INFRASTRUCTURE_CHANGED}" == "true" && "${INFRASTRUCTURE_ENABLED}" != "true" ]]; then
+            echo "::error::Infrastructure changed while component IaC is disabled."
+            exit 1
+          fi
+
+          if [[ "${INFRASTRUCTURE_ENABLED}" == "true" ]]; then
+            validate_path \
+              "infrastructure_scan_path" \
+              "${INFRASTRUCTURE_SCAN_PATH}"
+          elif [[ -n "${INFRASTRUCTURE_SCAN_PATH}" ]]; then
+            echo "::error::IaC scan path must be empty when IaC is disabled."
+            exit 1
+          fi
+
+          if [[ "${APPLICATION_CHANGED}" != "true" && "${INFRASTRUCTURE_CHANGED}" != "true" ]]; then
+            echo "::error::Component has no applicable change."
+            exit 1
+          fi
+
+          if [[ -z "${TOOLING_REF}" ]]; then
+            echo "::error::tooling_ref cannot be empty."
+            exit 1
+          fi
+
+          echo "Component configuration validation: PASS"
+
+  dotnet-ci:
+    name: "${{ inputs.component_name }} / .NET CI"
+
+    needs:
+      - validate
+
+    if: >-
+      ${{
+        inputs.application_changed &&
+        inputs.build_enabled &&
+        inputs.build_profile == 'dotnet'
+      }}
+
+    uses: ./.github/workflows/dotnet-ci.yml
+
+    permissions:
+      contents: read
+
+    with:
+      component_name: ${{ inputs.component_name }}
+      component_path: ${{ inputs.component_path }}
+      tier: ${{ inputs.tier }}
+
+  node-ci:
+    name: "${{ inputs.component_name }} / Node CI"
+
+    needs:
+      - validate
+
+    if: >-
+      ${{
+        inputs.application_changed &&
+        inputs.build_enabled &&
+        inputs.build_profile == 'node'
+      }}
+
+    uses: ./.github/workflows/node-ci.yml
+
+    permissions:
+      contents: read
+
+    with:
+      component_name: ${{ inputs.component_name }}
+      component_path: ${{ inputs.component_path }}
+      tier: ${{ inputs.tier }}
+
+  java-ci:
+    name: "${{ inputs.component_name }} / Java CI"
+
+    needs:
+      - validate
+
+    if: >-
+      ${{
+        inputs.application_changed &&
+        inputs.build_enabled &&
+        inputs.build_profile == 'java'
+      }}
+
+    uses: ./.github/workflows/java-ci.yml
+
+    permissions:
+      contents: read
+
+    with:
+      component_name: ${{ inputs.component_name }}
+      component_path: ${{ inputs.component_path }}
+      tier: ${{ inputs.tier }}
+
+  python-ci:
+    name: "${{ inputs.component_name }} / Python CI"
+
+    needs:
+      - validate
+
+    if: >-
+      ${{
+        inputs.application_changed &&
+        inputs.build_enabled &&
+        inputs.build_profile == 'python'
+      }}
+
+    uses: ./.github/workflows/python-ci.yml
+
+    permissions:
+      contents: read
+
+    with:
+      component_name: ${{ inputs.component_name }}
+      component_path: ${{ inputs.component_path }}
+      tier: ${{ inputs.tier }}
+
+  codeql:
+    name: "${{ inputs.component_name }} / CodeQL"
+
+    needs:
+      - validate
+
+    if: ${{ inputs.application_changed }}
+
+    uses: ./.github/workflows/codeql-security.yml
+
+    permissions:
+      contents: read
+      security-events: write
+
+    with:
+      component_name: ${{ inputs.component_name }}
+      component_path: ${{ inputs.component_path }}
+      language: ${{ inputs.language }}
+      query_suite: "security-extended"
+
+  iac-security:
+    name: "${{ inputs.component_name }} / IaC Security"
+
+    needs:
+      - validate
+
+    if: >-
+      ${{
+        inputs.infrastructure_enabled &&
+        inputs.infrastructure_changed
+      }}
+
+    uses: ./.github/workflows/iac-security.yml
+
+    permissions:
+      contents: read
+      security-events: write
+
+    with:
+      tier: ${{ inputs.tier }}
+      scan_path: ${{ inputs.infrastructure_scan_path }}
+      tooling_ref: ${{ inputs.tooling_ref }}
+
+  container-build:
+    name: "${{ inputs.component_name }} / Container Build"
+
+    needs:
+      - validate
+      - dotnet-ci
+      - node-ci
+      - java-ci
+      - python-ci
+
+    if: >-
+      ${{
+        always() &&
+        inputs.execution_mode == 'full' &&
+        inputs.application_changed &&
+        inputs.container_enabled &&
+        needs.validate.result == 'success' &&
+        (
+          needs.dotnet-ci.result == 'success' ||
+          needs.dotnet-ci.result == 'skipped'
+        ) &&
+        (
+          needs.node-ci.result == 'success' ||
+          needs.node-ci.result == 'skipped'
+        ) &&
+        (
+          needs.java-ci.result == 'success' ||
+          needs.java-ci.result == 'skipped'
+        ) &&
+        (
+          needs.python-ci.result == 'success' ||
+          needs.python-ci.result == 'skipped'
+        )
+      }}
+
+    uses: ./.github/workflows/container-build.yml
+
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+
+    with:
+      image_name: ${{ inputs.image_name }}
+      dockerfile: ${{ inputs.dockerfile }}
+      build_context: ${{ inputs.build_context }}
+
+  container-security:
+    name: "${{ inputs.component_name }} / Container Security"
+
+    needs:
+      - validate
+      - container-build
+
+    if: >-
+      ${{
+        always() &&
+        inputs.execution_mode == 'full' &&
+        inputs.application_changed &&
+        inputs.container_enabled &&
+        needs.validate.result == 'success' &&
+        needs.container-build.result == 'success'
+      }}
+
+    uses: ./.github/workflows/container-security.yml
+
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+
+    with:
+      tier: ${{ inputs.tier }}
+      image_uri: ${{ needs.container-build.outputs.image_uri }}
+      tooling_ref: ${{ inputs.tooling_ref }}
+
+  component-gate:
+    name: "${{ inputs.component_name }} / component-gate"
+
+    if: ${{ always() }}
+
+    needs:
+      - validate
+      - dotnet-ci
+      - node-ci
+      - java-ci
+      - python-ci
+      - codeql
+      - iac-security
+      - container-build
+      - container-security
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    outputs:
+      result: ${{ steps.gate.outputs.result }}
+      image-ref: ${{ steps.outputs.outputs.image-ref }}
+      image-digest: ${{ steps.outputs.outputs.image-digest }}
+      image-uri: ${{ steps.outputs.outputs.image-uri }}
+
+    steps:
+      - name: Evaluate Component Gate
+        id: gate
+        shell: bash
+        env:
+          EXECUTION_MODE: ${{ inputs.execution_mode }}
+          APPLICATION_CHANGED: ${{ inputs.application_changed }}
+          BUILD_ENABLED: ${{ inputs.build_enabled }}
+          BUILD_PROFILE: ${{ inputs.build_profile }}
+          CONTAINER_ENABLED: ${{ inputs.container_enabled }}
+          INFRASTRUCTURE_CHANGED: ${{ inputs.infrastructure_changed }}
+
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+          DOTNET_RESULT: ${{ needs.dotnet-ci.result }}
+          NODE_RESULT: ${{ needs.node-ci.result }}
+          JAVA_RESULT: ${{ needs.java-ci.result }}
+          PYTHON_RESULT: ${{ needs.python-ci.result }}
+          CODEQL_RESULT: ${{ needs.codeql.result }}
+          IAC_RESULT: ${{ needs.iac-security.result }}
+          CONTAINER_BUILD_RESULT: ${{ needs.container-build.result }}
+          CONTAINER_SECURITY_RESULT: ${{ needs.container-security.result }}
+        run: |
+          set -euo pipefail
+
+          FINAL_RESULT="PASS"
+
+          require_success() {
+            local control_name="$1"
+            local control_result="$2"
+
+            if [[ "${control_result}" != "success" ]]; then
+              echo "::error::${control_name} did not pass. Result: ${control_result}"
+              FINAL_RESULT="FAIL"
+            fi
+          }
+
+          require_skipped() {
+            local control_name="$1"
+            local control_result="$2"
+
+            if [[ "${control_result}" != "skipped" ]]; then
+              echo "::error::${control_name} should be skipped. Result: ${control_result}"
+              FINAL_RESULT="FAIL"
+            fi
+          }
+
+          require_success \
+            "Configuration validation" \
+            "${VALIDATE_RESULT}"
+
+          if [[ "${APPLICATION_CHANGED}" == "true" ]]; then
+            if [[ "${BUILD_ENABLED}" == "true" ]]; then
+              case "${BUILD_PROFILE}" in
+                dotnet)
+                  require_success ".NET CI" "${DOTNET_RESULT}"
+                  require_skipped "Node CI" "${NODE_RESULT}"
+                  require_skipped "Java CI" "${JAVA_RESULT}"
+                  require_skipped "Python CI" "${PYTHON_RESULT}"
+                  ;;
+
+                node)
+                  require_skipped ".NET CI" "${DOTNET_RESULT}"
+                  require_success "Node CI" "${NODE_RESULT}"
+                  require_skipped "Java CI" "${JAVA_RESULT}"
+                  require_skipped "Python CI" "${PYTHON_RESULT}"
+                  ;;
+
+                java)
+                  require_skipped ".NET CI" "${DOTNET_RESULT}"
+                  require_skipped "Node CI" "${NODE_RESULT}"
+                  require_success "Java CI" "${JAVA_RESULT}"
+                  require_skipped "Python CI" "${PYTHON_RESULT}"
+                  ;;
+
+                python)
+                  require_skipped ".NET CI" "${DOTNET_RESULT}"
+                  require_skipped "Node CI" "${NODE_RESULT}"
+                  require_skipped "Java CI" "${JAVA_RESULT}"
+                  require_success "Python CI" "${PYTHON_RESULT}"
+                  ;;
+
+                *)
+                  echo "::error::Unexpected build profile '${BUILD_PROFILE}'."
+                  FINAL_RESULT="FAIL"
+                  ;;
+              esac
+            else
+              require_skipped ".NET CI" "${DOTNET_RESULT}"
+              require_skipped "Node CI" "${NODE_RESULT}"
+              require_skipped "Java CI" "${JAVA_RESULT}"
+              require_skipped "Python CI" "${PYTHON_RESULT}"
+            fi
+
+            require_success \
+              "CodeQL" \
+              "${CODEQL_RESULT}"
+
+            if [[ "${EXECUTION_MODE}" == "full" && "${CONTAINER_ENABLED}" == "true" ]]; then
+              require_success \
+                "Container Build" \
+                "${CONTAINER_BUILD_RESULT}"
+
+              require_success \
+                "Container Security" \
+                "${CONTAINER_SECURITY_RESULT}"
+            else
+              require_skipped \
+                "Container Build" \
+                "${CONTAINER_BUILD_RESULT}"
+
+              require_skipped \
+                "Container Security" \
+                "${CONTAINER_SECURITY_RESULT}"
+            fi
+          else
+            require_skipped ".NET CI" "${DOTNET_RESULT}"
+            require_skipped "Node CI" "${NODE_RESULT}"
+            require_skipped "Java CI" "${JAVA_RESULT}"
+            require_skipped "Python CI" "${PYTHON_RESULT}"
+            require_skipped "CodeQL" "${CODEQL_RESULT}"
+            require_skipped "Container Build" "${CONTAINER_BUILD_RESULT}"
+            require_skipped "Container Security" "${CONTAINER_SECURITY_RESULT}"
+          fi
+
+          if [[ "${INFRASTRUCTURE_CHANGED}" == "true" ]]; then
+            require_success \
+              "Component IaC Security" \
+              "${IAC_RESULT}"
+          else
+            require_skipped \
+              "Component IaC Security" \
+              "${IAC_RESULT}"
+          fi
+
+          echo "result=${FINAL_RESULT}" >> "${GITHUB_OUTPUT}"
+
+          if [[ "${FINAL_RESULT}" != "PASS" ]]; then
+            echo "::error::Component Gate: FAIL"
+            exit 1
+          fi
+
+          echo "Component Gate: PASS"
+
+      - name: Expose Component Outputs
+        id: outputs
+        if: ${{ always() }}
+        shell: bash
+        env:
+          EXECUTION_MODE: ${{ inputs.execution_mode }}
+          CONTAINER_ENABLED: ${{ inputs.container_enabled }}
+          CONTAINER_BUILD_RESULT: ${{ needs.container-build.result }}
+          IMAGE_REF: ${{ needs.container-build.outputs.image_ref }}
+          IMAGE_DIGEST: ${{ needs.container-build.outputs.image_digest }}
+          IMAGE_URI: ${{ needs.container-build.outputs.image_uri }}
+        run: |
+          set -euo pipefail
+
+          if [[ \
+            "${EXECUTION_MODE}" == "full" \
+            && "${CONTAINER_ENABLED}" == "true" \
+            && "${CONTAINER_BUILD_RESULT}" == "success" \
+          ]]; then
+            if [[ -z "${IMAGE_REF}" ]]; then
+              echo "::error::Container Build did not expose image_ref."
+              exit 1
+            fi
+
+            if [[ ! "${IMAGE_DIGEST}" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+              echo "::error::Invalid image digest."
+              exit 1
+            fi
+
+            if [[ ! "${IMAGE_URI}" =~ @sha256:[a-f0-9]{64}$ ]]; then
+              echo "::error::Invalid immutable image URI."
+              exit 1
+            fi
+
+            echo "image-ref=${IMAGE_REF}" >> "${GITHUB_OUTPUT}"
+            echo "image-digest=${IMAGE_DIGEST}" >> "${GITHUB_OUTPUT}"
+            echo "image-uri=${IMAGE_URI}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "image-ref=" >> "${GITHUB_OUTPUT}"
+            echo "image-digest=" >> "${GITHUB_OUTPUT}"
+            echo "image-uri=" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Generate Component Summary
+        if: ${{ always() }}
+        shell: bash
+        env:
+          EXECUTION_MODE: ${{ inputs.execution_mode }}
+          APPLICATION_CHANGED: ${{ inputs.application_changed }}
+          INFRASTRUCTURE_CHANGED: ${{ inputs.infrastructure_changed }}
+          DOTNET_RESULT: ${{ needs.dotnet-ci.result }}
+          NODE_RESULT: ${{ needs.node-ci.result }}
+          JAVA_RESULT: ${{ needs.java-ci.result }}
+          PYTHON_RESULT: ${{ needs.python-ci.result }}
+          CODEQL_RESULT: ${{ needs.codeql.result }}
+          IAC_RESULT: ${{ needs.iac-security.result }}
+          CONTAINER_BUILD_RESULT: ${{ needs.container-build.result }}
+          CONTAINER_SECURITY_RESULT: ${{ needs.container-security.result }}
+          FINAL_RESULT: ${{ steps.gate.outputs.result }}
+        run: |
+          {
+            echo "## Component Gate"
+            echo
+            echo "| Property | Value |"
+            echo "|---|---|"
+            echo "| Component | \`${{ inputs.component_name }}\` |"
+            echo "| Execution mode | \`${EXECUTION_MODE}\` |"
+            echo "| Application changed | ${APPLICATION_CHANGED} |"
+            echo "| Infrastructure changed | ${INFRASTRUCTURE_CHANGED} |"
+            echo "| .NET CI | ${DOTNET_RESULT} |"
+            echo "| Node CI | ${NODE_RESULT} |"
+            echo "| Java CI | ${JAVA_RESULT} |"
+            echo "| Python CI | ${PYTHON_RESULT} |"
+            echo "| CodeQL | ${CODEQL_RESULT} |"
+            echo "| Component IaC | ${IAC_RESULT} |"
+            echo "| Container Build | ${CONTAINER_BUILD_RESULT} |"
+            echo "| Container Security | ${CONTAINER_SECURITY_RESULT} |"
+            echo "| Final result | **${FINAL_RESULT:-FAIL}** |"
+          } >> "${GITHUB_STEP_SUMMARY}"

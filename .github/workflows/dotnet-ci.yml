@@ -1,0 +1,704 @@
+name: Reusable .NET Component CI
+
+on:
+  workflow_call:
+    inputs:
+      component_name:
+        description: "Component name from components.yml"
+        required: true
+        type: string
+
+      component_path:
+        description: "Repository-relative component directory"
+        required: true
+        type: string
+
+      tier:
+        description: "Component Tier: 1, 2 or 3"
+        required: true
+        type: number
+
+      dotnet_version:
+        description: "Fallback .NET SDK version when global.json is absent"
+        required: false
+        type: string
+        default: "10.0.x"
+
+      project_file:
+        description: "Optional repository-relative solution or project file"
+        required: false
+        type: string
+        default: ""
+
+      configuration:
+        description: "Build configuration"
+        required: false
+        type: string
+        default: "Release"
+
+      run_tests:
+        description: "Run dotnet test"
+        required: false
+        type: boolean
+        default: true
+
+      collect_coverage:
+        description: "Collect XPlat Code Coverage in Cobertura format"
+        required: false
+        type: boolean
+        default: true
+
+      treat_warnings_as_errors:
+        description: "Treat compiler warnings as errors"
+        required: false
+        type: boolean
+        default: true
+
+      evidence_retention_days:
+        description: "Evidence artifact retention period"
+        required: false
+        type: number
+        default: 30
+
+    outputs:
+      result:
+        description: "Technology CI result"
+        value: ${{ jobs.dotnet-ci.outputs.result }}
+
+      build_target:
+        description: "Solution or project used by the build"
+        value: ${{ jobs.dotnet-ci.outputs.build-target }}
+
+      artifact_name:
+        description: "Published component artifact name"
+        value: ${{ jobs.dotnet-ci.outputs.artifact-name }}
+
+      dotnet_version:
+        description: ".NET SDK version used"
+        value: ${{ jobs.dotnet-ci.outputs.dotnet-version }}
+
+permissions:
+  contents: read
+
+jobs:
+  dotnet-ci:
+    name: "${{ inputs.component_name }} / .NET CI"
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    outputs:
+      result: ${{ steps.outputs.outputs.result }}
+      build-target: ${{ steps.target.outputs.build-target }}
+      artifact-name: ${{ steps.outputs.outputs.artifact-name }}
+      dotnet-version: ${{ steps.sdk.outputs.version }}
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      DOTNET_NOLOGO: "true"
+      DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "true"
+      NUGET_XMLDOC_MODE: "skip"
+
+      COMPONENT_NAME: ${{ inputs.component_name }}
+      COMPONENT_PATH: ${{ inputs.component_path }}
+      CONFIGURATION: ${{ inputs.configuration }}
+
+      RESULTS_DIRECTORY: ${{ github.workspace }}/.ci-results/dotnet
+      TEST_RESULTS_DIRECTORY: ${{ github.workspace }}/.ci-results/dotnet/tests
+      COVERAGE_DIRECTORY: ${{ github.workspace }}/.ci-results/dotnet/coverage
+      PUBLISH_DIRECTORY: ${{ github.workspace }}/.ci-results/dotnet/publish
+
+    steps:
+      - name: Validate .NET CI inputs
+        env:
+          TIER: ${{ inputs.tier }}
+          FALLBACK_DOTNET_VERSION: ${{ inputs.dotnet_version }}
+          PROJECT_FILE: ${{ inputs.project_file }}
+          RETENTION_DAYS: ${{ inputs.evidence_retention_days }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${COMPONENT_NAME}" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+            echo "::error::Invalid component_name '${COMPONENT_NAME}'."
+            exit 1
+          fi
+
+          if [[ -z "${COMPONENT_PATH}" ]]; then
+            echo "::error::component_path cannot be empty."
+            exit 1
+          fi
+
+          if [[ "${COMPONENT_PATH}" == /* ]]; then
+            echo "::error::component_path must be repository-relative."
+            exit 1
+          fi
+
+          if [[ "${COMPONENT_PATH}" == *".."* ]]; then
+            echo "::error::Parent traversal is not allowed in component_path."
+            exit 1
+          fi
+
+          if [[ -n "${PROJECT_FILE}" ]]; then
+            if [[ "${PROJECT_FILE}" == /* ]]; then
+              echo "::error::project_file must be repository-relative."
+              exit 1
+            fi
+
+            if [[ "${PROJECT_FILE}" == *".."* ]]; then
+              echo "::error::Parent traversal is not allowed in project_file."
+              exit 1
+            fi
+          fi
+
+          case "${TIER}" in
+            1|2|3)
+              ;;
+            *)
+              echo "::error::In*alid Tier '${TIER}'."
+            * exit 1
+              ;;
+         *esac
+
+          case "${CONFIGURAT*ON}" in
+            Debug|Release)*              ;;
+            *)
+  *           echo "::error::Unsuppor*ed build configuration '${CONFIGUR*TION}'."
+              exit 1
+    *         ;;
+          esac
+
+      *   if [[ -z "${FALLBACK_DOTNET_VERSION}" ]]; then
+            echo ":*error::dotnet_version fallback can*ot be empty."
+            exit 1
+ *        fi
+
+          if ! [[ "${RETENTION_DAYS}" =~ ^[0-9]+$ ]]; the*
+            echo "::error::eviden*e_retention_days must be numeric."*            exit 1
+          fi
+
+ *        if [[ "${RETENTION_DAYS}" -lt 1 || "${RETENTION_DAYS}" -gt 90 ]]; then
+            echo "::error*:evidence_retention_days must be b*tween 1 and 90."
+            exit *
+          fi
+
+      - name: Check*ut repository
+        uses: action*/checkout@<APPROVED_FULL_SHA>
+    *   with:
+          fetch-depth: 0
+*      - name: Validate component d*rectory
+        run: |
+          s*t -euo pipefail
+
+          if [[ ! -d "${COMPONENT_PATH}" ]]; then
+  *         echo "::error::Component *irectory does not exist: ${COMPONE*T_PATH}"
+            exit 1
+      *   fi
+
+      - name: Resolve .NET *DK
+        id: sdk
+        env:
+  *       FALLBACK_VERSION: ${{ input*.dotnet_version }}
+        run: |
+*         set -euo pipefail
+
+      *   GLOBAL_JSON=""
+
+          if [[ -f "${COMPONENT_PATH}/global.json" ]]; then
+            GLOBAL_JSON="*{COMPONENT_PATH}/global.json"
+    *     elif [[ -f "global.json" ]]; *hen
+            GLOBAL_JSON="globa*.json"
+          fi
+
+          if *[ -n "${GLOBAL_JSON}" ]]; then
+   *        SDK_VERSION="$(
+          *   python - "${GLOBAL_JSON}" <<'PY*
+          import json
+          i*port sys
+
+          path = sys.arg*[1]
+
+          with open(path, "r"* encoding="utf-8") as file:
+      *       document = json.load(file)
+*          sdk = document.get("sdk"*
+
+          if not isinstance(sdk,*dict):
+              raise SystemE*it(
+                  f"global.jso* does not contain an sdk object: {*ath}"
+              )
+
+          v*rsion = sdk.get("version")
+
+      *   if not isinstance(version, str)*or not version.strip():
+          *   raise SystemExit(
+             *    f"global.json does not contain*sdk.version: {path}"
+             *)
+
+          print(version.strip()*
+          PY
+            )"
+
+    *       SDK_SOURCE="global-json"
+
+ *          echo "Using .NET SDK ${S*K_VERSION} from ${GLOBAL_JSON}"
+  *       else
+            SDK_VERSIO*="${FALLBACK_VERSION}"
+           *SDK_SOURCE="fallback"
+
+           *echo "No global.json was found."
+ *          echo "Using fallback .NE* SDK ${SDK_VERSION}"
+          fi
+*          echo "version=${SDK_VERS*ON}" >> "${GITHUB_OUTPUT}"
+       *  echo "source=${SDK_SOURCE}" >> "*{GITHUB_OUTPUT}"
+          echo "g*obal-json=${GLOBAL_JSON}" >> "${GI*HUB_OUTPUT}"
+
+      - name: Set up*.NET
+        uses: actions/setup-d*tnet@<APPROVED_FULL_SHA>
+        w*th:
+          dotnet-version: ${{ *teps.sdk.outputs.version }}
+      *   cache: true
+          cache-dep*ndency-path: |
+            ${{ inp*ts.component_path }}/**/packages.l***.json
+
+      - name: Display .NE***nformation
+        run: |
+      *** set -euo pipefail
+
+          do***t --info
+
+          echo
+       ***echo "Installed SDKs:"
+         ***tnet --list-sdks
+
+          echo***        echo "Installed runtimes***          dotnet --list-runtimes***     - name: Discover .NET proje***
+        id: projects
+        ru***|
+          set -euo pipefail
+
+ ***      mapfile -t PROJECT_FILES <***
+            find "${COMPONENT_P***}" \
+              -type f \
+   ***        \( \
+                -na***"*.csproj" \
+                -o **ame "*.fsproj" \
+                ***-name "*.vbproj" \
+             **) \
+              -not -path "*/b****" \
+              -not -path "****j/*" \
+              | sort
+    **    )
+
+          if [[ "${#PROJECT_FILES[@]}" -eq 0 ]]; then
+       **   echo "::error::No .NET project**iles were found under ${COMPONENT**ATH}."
+            exit 1
+       ** fi
+
+          echo "Discovered .**T projects: ${#PROJECT_FILES[@]}"**          printf '%s\n' "${PROJEC**FILES[@]}"
+
+      - name: Validat**NuGet lock files
+        id: lock**les
+        run: |
+          set **uo pipefail
+
+          mapfile -t**ROJECT_FILES < <(
+            fin**"${COMPONENT_PATH}" \
+           ** -type f \
+              \( \
+   **           -name "*.csproj" \
+   ***          -o -name "*.fsproj" \
+**              -o -name "*.vbproj"***              \) \
+             ***ot -path "*/bin/*" \
+           ***-not -path "*/obj/*" \
+         ***  | sort
+          )
+
+          ***SING_LOCK_FILES=()
+          LOC***ILES=()
+
+          for PROJECT_F*** in "${PROJECT_FILES[@]}"; do
+  ***       PROJECT_DIRECTORY="$(dirn*** "${PROJECT_FILE}")"
+           ***CK_FILE="${PROJECT_DIRECTORY}/pa***ges.lock.json"
+
+            if [[ -f "${LOCK_FILE}" ]]; then
+      ***     LOCK_FILES+=("${LOCK_FILE}"***           else
+              MI***NG_LOCK_FILES+=("${PROJECT_FILE}***            fi
+          done
+
+ ***      if [[ "${#MISSING_LOCK_FILES[@]}" -gt 0 ]]; then
+            ***o "::error::NuGet lock files are***ndatory."
+            echo "::er***::The following projects are mis***g packages.lock.json:"
+
+        *** for PROJECT_FILE in "${MISSING_***K_FILES[@]}"; do
+              e*** "::error::${PROJECT_FILE}"
+    ***     done
+
+            echo "::e***r::Generate the lock files using***            echo "::error::dotne***estore --use-lock-file"
+        *** echo "::error::Commit all packa***.lock.json files to the reposito***"
+
+            exit 1
+          ***
+          if [[ "${#LOCK_FILES[@]}" -eq 0 ]]; then
+            ech***::error::No packages.lock.json f***s were found."
+            exit ***         fi
+
+          echo "NuG***lock files: ${#LOCK_FILES[@]}"
+
+***       printf '%s\n' "${LOCK_FIL***@]}"
+
+      - name: Resolve solu***n or project
+        id: target
+***     env:
+          INPUT_PROJEC***ILE: ${{ inputs.project_file }}
+***     run: |
+          set -euo p***fail
+
+          if [[ -n "${INPUT_PROJECT_FILE}" ]]; then
+         ***if [[ ! -f "${INPUT_PROJECT_FILE}" ]]; then
+              echo "::e***r::Configured project_file does *** exist: ${INPUT_PROJECT_FILE}"
+ ***          exit 1
+            fi
+***          case "${INPUT_PROJECT_***E}" in
+              *.sln|*.sln***.csproj|*.fsproj|*.vbproj)
+     ***        BUILD_TARGET="${INPUT_PR***CT_FILE}"
+                ;;
+   ***        *)
+                echo ***error::Unsupported project_file ***ension: ${INPUT_PROJECT_FILE}"
+ ***            exit 1
+             ***;;
+            esac
+          el***            mapfile -t SOLUTIONS***<(
+              find "${COMPONE***PATH}" \
+                -maxdep***3 \
+                -type f \
+  ***           \( \
+                ***name "*.sln" \
+                 **o -name "*.slnx" \
+              ***) \
+                -not -path "**bin/*" \
+                -not -pa***"*/obj/*" \
+                | so***            )
+
+            if [[ "${#SOLUTIONS[@]}" -eq 1 ]]; then
+***           BUILD_TARGET="${SOLUT***S[0]}"
+            elif [[ "${#SOLUTIONS[@]}" -gt 1 ]]; then
+      ***     echo "::error::Multiple sol***on files were found."
+          *** printf '::error::%s\n' "${SOLUT***S[@]}"
+              echo "::err***:Configure project_file explicit***"
+              exit 1
+         ***else
+              mapfile -t PR***CTS < <(
+                find "$***MPONENT_PATH}" \
+               ***-maxdepth 3 \
+                  ***pe f \
+                  \( \
+  ***               -name "*.csproj" **                    -o -name "*.f***oj" \
+                    -o -na***"*.vbproj" \
+                  \**\
+                  -not -path "****n/*" \
+                  -not -p**h "*/obj/*" \
+                  |**ort
+              )
+
+            **if [[ "${#PROJECTS[@]}" -eq 1 ]];**hen
+                BUILD_TARGET=**{PROJECTS[0]}"
+              elif**[ "${#PROJECTS[@]}" -eq 0 ]]; the**                echo "::error::No**NET solution or project was found**
+                exit 1
+         **   else
+                echo "::e**or::Multiple project files were f**nd and no solution exists."
+     **         printf '::error::%s\n' "**PROJECTS[@]}"
+                ech**"::error::Add a solution or confi**re project_file explicitly."
+    **          exit 1
+              fi**           fi
+          fi
+
+     **   echo "build-target=${BUILD_TAR**T}" >> "${GITHUB_OUTPUT}"
+       ** echo "Build target: ${BUILD_TARG**}"
+
+      - name: Prepare evidenc**directories
+        run: |
+      **  set -euo pipefail
+
+          mk**r -p \
+            "${RESULTS_DIR**TORY}" \
+            "${TEST_RESU**S_DIRECTORY}" \
+            "${CO**RAGE_DIRECTORY}" \
+            "$**UBLISH_DIRECTORY}"
+
+      - name:**estore dependencies in locked mod**        env:
+          BUILD_TARG**: ${{ steps.target.outputs.build-**rget }}
+        run: |
+          **t -euo pipefail
+
+          dotnet**estore \
+            "${BUILD_TAR**T}" \
+            --locked-mode
+
+**    - name: Build component
+     ** env:
+          BUILD_TARGET: ${{**teps.target.outputs.build-target **
+          WARNINGS_AS_ERRORS: ${**inputs.treat_warnings_as_errors }**        run: |
+          set -euo**ipefail
+
+          ARGS=(
+       **   build
+            "${BUILD_TAR**T}"
+            --configuration "**CONFIGURATION}"
+            --no-**store
+          )
+
+          if [[ "${WARNINGS_AS_ERRORS}" == "true" ]]; then
+            ARGS+=(
+     **       --warnaserror
+            **          fi
+
+          dotnet "${ARGS[@]}"
+
+      - name: Test component with coverage
+        if: ${{ inputs.run_tests && inputs.collect_coverage }}
+        env:
+          BUILD_TARGET: ${{ steps.target.outputs.build-target }}
+        run: |
+          set -euo pipefail
+
+          dotnet test \
+            "${BUILD_TARGET}" \
+            --configuration "${CONFIGURATION}" \
+            --no-build \
+            --logger "trx" \
+            --results-directory "${TEST_RESULTS_DIRECTORY}" \
+            --collect "XPlat Code Coverage" \
+            -- \
+            DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=cobertura
+
+      - name: Test component without coverage
+        if: ${{ inputs.run_tests && !inputs.collect_coverage }}
+        env:
+          BUILD_TARGET: ${{ steps.target.outputs.build-target }}
+        run: |
+          set -euo pipefail
+
+          dotnet test \
+            "${BUILD_TARGET}" \
+            --configuration "${CONFIGURATION}" \
+            --no-build \
+            --logger "trx" \
+            --results-directory "${TEST_RESULTS_DIRECTORY}"
+
+      - name: Validate test evidence
+        if: ${{ inputs.run_tests }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t RESULT_FILES < <(
+            find "${TEST_RESULTS_DIRECTORY}" \
+              -type f \
+              -name "*.trx" \
+              | sort
+          )
+
+          if [[ "${#RESULT_FILES[@]}" -eq 0 ]]; then
+            echo "::error::Tests were enabled, but no TRX result was generated."
+            exit 1
+          fi
+
+          echo "TRX result files: ${#RESULT_FILES[@]}"
+
+      - name: Collect coverage evidence
+        if: ${{ inputs.run_tests && inputs.collect_coverage }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t COVERAGE_FILES < <(
+            find "${TEST_RESULTS_DIRECTORY}" \
+              -type f \
+              -name "coverage.cobertura.xml" \
+              | sort
+          )
+
+          if [[ "${#COVERAGE_FILES[@]}" -eq 0 ]]; then
+            echo "::error::Coverage was enabled, but no Cobertura report was generated."
+            echo "::error::Ensure the test projects reference coverlet.collector."
+            exit 1
+          fi
+
+          for INDEX in "${!COVERAGE_FILES[@]}"; do
+            cp \
+              "${COVERAGE_FILES[${INDEX}]}" \
+              "${COVERAGE_DIRECTORY}/coverage-${INDEX}.cobertura.xml"
+          done
+
+          echo "Coverage files: ${#COVERAGE_FILES[@]}"
+
+      - name: Publish component
+        env:
+          BUILD_TARGET: ${{ steps.target.outputs.build-target }}
+        run: |
+          set -euo pipefail
+
+          case "${BUILD_TARGET}" in
+            *.csproj|*.fsproj|*.vbproj)
+              dotnet publish \
+                "${BUILD_TARGET}" \
+                --configuration "${CONFIGURATION}" \
+                --no-build \
+                --output "${PUBLISH_DIRECTORY}"
+              ;;
+
+            *.sln|*.slnx)
+              echo "Solution target detected."
+              echo "Generic publish is skipped for solution targets."
+              echo "The Dockerfile must publish the intended deployable project."
+              ;;
+
+            *)
+              echo "::error::Unsupported build target: ${BUILD_TARGET}"
+              exit 1
+              ;;
+          esac
+
+      - name: Generate .NET CI metadata
+        if: ${{ always() }}
+        env:
+          BUILD_TARGET: ${{ steps.target.outputs.build-target }}
+          TIER: ${{ inputs.tier }}
+          SDK_VERSION: ${{ steps.sdk.outputs.version }}
+          SDK_SOURCE: ${{ steps.sdk.outputs.source }}
+          GLOBAL_JSON: ${{ steps.sdk.outputs.global-json }}
+          RUN_TESTS: ${{ inputs.run_tests }}
+          COLLECT_COVERAGE: ${{ inputs.collect_coverage }}
+          WARNINGS_AS_ERRORS: ${{ inputs.treat_warnings_as_errors }}
+          REPOSITORY: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          metadata = {
+              "schema_version": 1,
+              "repository": os.environ["REPOSITORY"],
+              "commit_sha": os.environ["COMMIT_SHA"],
+              "component": {
+                  "name": os.environ["COMPONENT_NAME"],
+                  "path": os.environ["COMPONENT_PATH"],
+                  "tier": int(os.environ["TIER"]),
+              },
+              "dotnet": {
+                  "sdk": os.environ["SDK_VERSION"],
+                  "sdk_source": os.environ["SDK_SOURCE"],
+                  "global_json": os.environ["GLOBAL_JSON"],
+                  "configuration": os.environ["CONFIGURATION"],
+                  "build_target": os.environ["BUILD_TARGET"],
+                  "locked_restore": True,
+                  "run_tests": (
+                      os.environ["RUN_TESTS"].lower() == "true"
+                  ),
+                  "collect_coverage": (
+                      os.environ["COLLECT_COVERAGE"].lower() == "true"
+                  ),
+                  "warnings_as_errors": (
+                      os.environ["WARNINGS_AS_ERRORS"].lower() == "true"
+                  ),
+              },
+              "workflow": {
+                  "run_id": os.environ["RUN_ID"],
+                  "run_attempt": os.environ["RUN_ATTEMPT"],
+                  "job_status": os.environ["JOB_STATUS"],
+              },
+          }
+
+          output = (
+              Path(os.environ["RESULTS_DIRECTORY"])
+              / "dotnet-ci-metadata.json"
+          )
+
+          output.parent.mkdir(
+              parents=True,
+              exist_ok=True,
+          )
+
+          output.write_text(
+              json.dumps(
+                  metadata,
+                  indent=2,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload .NET CI evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@<APPROVED_FULL_SHA>
+        with:
+          name: ${{ inputs.component_name }}-dotnet-ci-evidence
+          retention-days: ${{ inputs.evidence_retention_days }}
+          if-no-files-found: warn
+          path: |
+            .ci-results/dotnet/dotnet-ci-metadata.json
+            .ci-results/dotnet/tests/**/*.trx
+            .ci-results/dotnet/coverage/**/*.xml
+
+      - name: Upload published component
+        if: ${{ success() }}
+        uses: actions/upload-artifact@<APPROVED_FULL_SHA>
+        with:
+          name: ${{ inputs.component_name }}-dotnet-publish
+          retention-days: ${{ inputs.evidence_retention_days }}
+          if-no-files-found: ignore
+          path: |
+            .ci-results/dotnet/publish/**
+
+      - name: Expose .NET CI outputs
+        id: outputs
+        if: ${{ success() }}
+        env:
+          ARTIFACT_NAME: ${{ inputs.component_name }}-dotnet-publish
+        run: |
+          set -euo pipefail
+
+          echo "result=PASS" >> "${GITHUB_OUTPUT}"
+          echo "artifact-name=${ARTIFACT_NAME}" >> "${GITHUB_OUTPUT}"
+
+      - name: Generate .NET CI summary
+        if: ${{ always() }}
+        env:
+          BUILD_TARGET: ${{ steps.target.outputs.build-target }}
+          TIER: ${{ inputs.tier }}
+          SDK_VERSION: ${{ steps.sdk.outputs.version }}
+          SDK_SOURCE: ${{ steps.sdk.outputs.source }}
+          GLOBAL_JSON: ${{ steps.sdk.outputs.global-json }}
+          RUN_TESTS: ${{ inputs.run_tests }}
+          COLLECT_COVERAGE: ${{ inputs.collect_coverage }}
+          WARNINGS_AS_ERRORS: ${{ inputs.treat_warnings_as_errors }}
+        run: |
+          {
+            echo "## .NET Component CI"
+            echo
+            echo "| Configuration | Value |"
+            echo "|---|---|"
+            echo "| Component | \`${COMPONENT_NAME}\` |"
+            echo "| Component path | \`${COMPONENT_PATH}\` |"
+            echo "| Tier | ${TIER} |"
+            echo "| Build target | \`${BUILD_TARGET}\` |"
+            echo "| SDK | \`${SDK_VERSION}\` |"
+            echo "| SDK source | \`${SDK_SOURCE}\` |"
+            echo "| global.json | \`${GLOBAL_JSON}\` |"
+            echo "| Configuration | \`${CONFIGURATION}\` |"
+            echo "| NuGet lock files | Required |"
+            echo "| Restore mode | \`--locked-mode\` |"
+            echo "| Tests | ${RUN_TESTS} |"
+            echo "| Coverage | ${COLLECT_COVERAGE} |"
+            echo "| Warnings as errors | ${WARNINGS_AS_ERRORS} |"
+          } >> "${GITHUB_STEP_SUMMARY}"

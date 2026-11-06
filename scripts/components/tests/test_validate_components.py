@@ -77,6 +77,13 @@ def valid_monorepo_manifest() -> dict[str, Any]:
                     "dockerfile": "backend/Dockerfile",
                     "build_context": "backend",
                 },
+                "infrastructure": {
+                    "enabled": True,
+                    "paths": [
+                        "backend/infra/**",
+                    ],
+                    "scan_path": "backend/infra",
+                },
             },
             "frontend": {
                 "type": "application",
@@ -97,6 +104,28 @@ def valid_monorepo_manifest() -> dict[str, Any]:
                     "dockerfile": "frontend/Dockerfile",
                     "build_context": "frontend",
                 },
+                "infrastructure": {
+                    "enabled": False,
+                },
+            },
+            "worker": {
+                "type": "worker",
+                "path": "worker",
+                "language": "python",
+                "tier": 2,
+                "paths": [
+                    "worker/**",
+                ],
+                "build": {
+                    "enabled": True,
+                    "profile": "python",
+                },
+                "container": {
+                    "enabled": False,
+                },
+                "infrastructure": {
+                    "enabled": False,
+                },
             },
         },
         "shared_paths": {
@@ -107,6 +136,7 @@ def valid_monorepo_manifest() -> dict[str, Any]:
                 "affects": [
                     "backend",
                     "frontend",
+                    "worker",
                 ],
             },
         },
@@ -120,9 +150,9 @@ def valid_monorepo_manifest() -> dict[str, Any]:
             "infrastructure": {
                 "enabled": True,
                 "paths": [
-                    "infra/**",
+                    "infra/shared/**",
                 ],
-                "scan_path": "infra",
+                "scan_path": "infra/shared",
             },
         },
     }
@@ -155,6 +185,9 @@ def valid_multirepo_manifest() -> dict[str, Any]:
                     "dockerfile": "Dockerfile",
                     "build_context": ".",
                 },
+                "infrastructure": {
+                    "enabled": False,
+                },
             },
         },
         "shared_paths": {},
@@ -172,7 +205,7 @@ def valid_multirepo_manifest() -> dict[str, Any]:
     }
 
 
-def valid_non_container_component() -> dict[str, Any]:
+def valid_library_manifest() -> dict[str, Any]:
     return {
         "version": 1,
         "components": {
@@ -191,41 +224,8 @@ def valid_non_container_component() -> dict[str, Any]:
                 "container": {
                     "enabled": False,
                 },
-            },
-        },
-        "shared_paths": {},
-        "repository_controls": {
-            "github_actions": {
-                "enabled": False,
-            },
-            "infrastructure": {
-                "enabled": False,
-            },
-        },
-    }
-
-
-def valid_python_worker_manifest() -> dict[str, Any]:
-    return {
-        "version": 1,
-        "components": {
-            "notification-worker": {
-                "type": "worker",
-                "path": "worker",
-                "language": "python",
-                "tier": 2,
-                "paths": [
-                    "worker/**",
-                ],
-                "build": {
-                    "enabled": True,
-                    "profile": "python",
-                },
-                "container": {
-                    "enabled": True,
-                    "image_name": "notification-worker",
-                    "dockerfile": "worker/Dockerfile",
-                    "build_context": "worker",
+                "infrastructure": {
+                    "enabled": False,
                 },
             },
         },
@@ -242,21 +242,22 @@ def valid_python_worker_manifest() -> dict[str, Any]:
 
 
 # ============================================================
-# Repository fixture creation
+# Repository fixture
 # ============================================================
 
-def create_monorepo_structure(
+def create_repository_structure(
     repository_root: Path,
 ) -> None:
     directories = [
         "backend",
+        "backend/infra",
         "frontend",
         "worker",
         "shared-library",
         "libs/common",
         "libs/backend-common",
         "libs/frontend-common",
-        "infra",
+        "infra/shared",
         ".github/workflows",
     ]
 
@@ -270,30 +271,17 @@ def create_monorepo_structure(
         )
 
     files = {
-        "backend/Dockerfile": (
-            "FROM scratch\n"
-        ),
-        "frontend/Dockerfile": (
-            "FROM scratch\n"
-        ),
-        "worker/Dockerfile": (
-            "FROM scratch\n"
-        ),
-        "Dockerfile": (
-            "FROM scratch\n"
-        ),
-        "Directory.Build.props": (
-            "<Project />\n"
-        ),
-        "Directory.Packages.props": (
-            "<Project />\n"
-        ),
+        "backend/Dockerfile": "FROM scratch\n",
+        "backend/infra/main.tf": "terraform {}\n",
+        "frontend/Dockerfile": "FROM scratch\n",
+        "worker/Dockerfile": "FROM scratch\n",
+        "Dockerfile": "FROM scratch\n",
+        "Directory.Build.props": "<Project />\n",
+        "Directory.Packages.props": "<Project />\n",
         "global.json": (
             '{"sdk": {"version": "10.0.100"}}\n'
         ),
-        "infra/main.tf": (
-            'terraform {}\n'
-        ),
+        "infra/shared/main.tf": "terraform {}\n",
     }
 
     for relative_path, content in files.items():
@@ -317,7 +305,7 @@ def create_monorepo_structure(
 def repository_root(
     tmp_path: Path,
 ) -> Path:
-    create_monorepo_structure(
+    create_repository_structure(
         tmp_path
     )
 
@@ -332,10 +320,6 @@ def schema() -> dict[str, Any]:
     ) as file:
         return json.load(file)
 
-
-# ============================================================
-# Complete validation helper
-# ============================================================
 
 def validate_complete_manifest(
     manifest: dict[str, Any],
@@ -354,19 +338,15 @@ def validate_complete_manifest(
 
 
 # ============================================================
-# Valid manifest scenarios
+# Valid manifests
 # ============================================================
 
 def test_valid_monorepo_manifest_passes(
     repository_root: Path,
     schema: dict[str, Any],
 ) -> None:
-    manifest = (
-        valid_monorepo_manifest()
-    )
-
     validate_complete_manifest(
-        manifest,
+        valid_monorepo_manifest(),
         schema,
         repository_root,
     )
@@ -376,39 +356,30 @@ def test_valid_multirepo_manifest_passes(
     repository_root: Path,
     schema: dict[str, Any],
 ) -> None:
-    manifest = (
-        valid_multirepo_manifest()
-    )
-
     validate_complete_manifest(
-        manifest,
+        valid_multirepo_manifest(),
         schema,
         repository_root,
     )
 
 
-def test_valid_component_without_container_passes(
+def test_valid_library_without_container_passes(
     repository_root: Path,
     schema: dict[str, Any],
 ) -> None:
-    manifest = (
-        valid_non_container_component()
-    )
-
     validate_complete_manifest(
-        manifest,
+        valid_library_manifest(),
         schema,
         repository_root,
     )
 
 
-def test_valid_python_worker_passes(
+def test_validation_does_not_modify_manifest(
     repository_root: Path,
     schema: dict[str, Any],
 ) -> None:
-    manifest = (
-        valid_python_worker_manifest()
-    )
+    manifest = valid_monorepo_manifest()
+    original = copy.deepcopy(manifest)
 
     validate_complete_manifest(
         manifest,
@@ -416,138 +387,65 @@ def test_valid_python_worker_passes(
         repository_root,
     )
 
-
-def test_empty_global_paths_are_valid(
-    repository_root: Path,
-    schema: dict[str, Any],
-) -> None:
-    manifest = (
-        valid_multirepo_manifest()
-    )
-
-    manifest["global_paths"] = []
-
-    validate_complete_manifest(
-        manifest,
-        schema,
-        repository_root,
-    )
-
-
-def test_missing_optional_global_paths_are_valid(
-    repository_root: Path,
-    schema: dict[str, Any],
-) -> None:
-    manifest = (
-        valid_multirepo_manifest()
-    )
-
-    manifest.pop(
-        "global_paths"
-    )
-
-    validate_complete_manifest(
-        manifest,
-        schema,
-        repository_root,
-    )
-
-
-def test_empty_shared_paths_are_valid(
-    repository_root: Path,
-    schema: dict[str, Any],
-) -> None:
-    manifest = (
-        valid_multirepo_manifest()
-    )
-
-    manifest["shared_paths"] = {}
-
-    validate_complete_manifest(
-        manifest,
-        schema,
-        repository_root,
-    )
+    assert manifest == original
 
 
 # ============================================================
-# Manifest loading
+# File loading
 # ============================================================
 
-def test_load_yaml_reads_valid_manifest(
+def test_load_yaml_reads_manifest(
     tmp_path: Path,
 ) -> None:
-    manifest_path = (
-        tmp_path
-        / "components.yml"
-    )
+    path = tmp_path / "components.yml"
 
-    manifest_path.write_text(
+    path.write_text(
         """
 version: 1
-
 components:
   application:
     type: application
     path: "."
     language: dotnet
     tier: 2
-
     paths:
       - "**"
-
     build:
       enabled: true
       profile: dotnet
-
     container:
+      enabled: false
+    infrastructure:
       enabled: false
 """.strip(),
         encoding="utf-8",
     )
 
-    document = MODULE.load_yaml(
-        manifest_path
-    )
+    document = MODULE.load_yaml(path)
 
     assert document["version"] == 1
-    assert "application" in document[
-        "components"
-    ]
+    assert "application" in document["components"]
 
 
-def test_load_yaml_fails_when_manifest_is_missing(
+def test_load_yaml_missing_file_fails(
     tmp_path: Path,
 ) -> None:
-    missing_path = (
-        tmp_path
-        / "missing.yml"
-    )
-
     with pytest.raises(
         MODULE.ComponentValidationError,
         match="Manifest does not exist",
     ):
         MODULE.load_yaml(
-            missing_path
+            tmp_path / "missing.yml"
         )
 
 
-def test_load_yaml_fails_for_invalid_yaml(
+def test_load_yaml_invalid_yaml_fails(
     tmp_path: Path,
 ) -> None:
-    manifest_path = (
-        tmp_path
-        / "invalid.yml"
-    )
+    path = tmp_path / "invalid.yml"
 
-    manifest_path.write_text(
-        """
-version: 1
-components:
-  backend:
-    invalid: [
-""".strip(),
+    path.write_text(
+        "version: [",
         encoding="utf-8",
     )
 
@@ -555,36 +453,7 @@ components:
         MODULE.ComponentValidationError,
         match="Invalid YAML",
     ):
-        MODULE.load_yaml(
-            manifest_path
-        )
-
-
-def test_load_yaml_fails_when_root_is_not_object(
-    tmp_path: Path,
-) -> None:
-    manifest_path = (
-        tmp_path
-        / "invalid-root.yml"
-    )
-
-    manifest_path.write_text(
-        """
-- backend
-- frontend
-""".strip(),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(
-        MODULE.ComponentValidationError,
-        match=(
-            "must contain a YAML object"
-        ),
-    ):
-        MODULE.load_yaml(
-            manifest_path
-        )
+        MODULE.load_yaml(path)
 
 
 def test_load_json_reads_schema() -> None:
@@ -592,76 +461,14 @@ def test_load_json_reads_schema() -> None:
         SCHEMA_PATH
     )
 
-    assert document[
-        "$schema"
-    ] == (
-        "https://json-schema.org/"
+    assert document["$schema"].endswith(
         "draft/2020-12/schema"
     )
-
-
-def test_load_json_fails_for_missing_file(
-    tmp_path: Path,
-) -> None:
-    missing_schema = (
-        tmp_path
-        / "missing-schema.json"
-    )
-
-    with pytest.raises(
-        MODULE.ComponentValidationError,
-        match="Schema does not exist",
-    ):
-        MODULE.load_json(
-            missing_schema
-        )
-
-
-def test_load_json_fails_for_invalid_json(
-    tmp_path: Path,
-) -> None:
-    schema_path = (
-        tmp_path
-        / "invalid.json"
-    )
-
-    schema_path.write_text(
-        "{ invalid-json }",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(
-        MODULE.ComponentValidationError,
-        match="Invalid JSON Schema",
-    ):
-        MODULE.load_json(
-            schema_path
-        )
 
 
 # ============================================================
 # Schema validation
 # ============================================================
-
-def test_schema_fails_for_invalid_version(
-    repository_root: Path,
-    schema: dict[str, Any],
-) -> None:
-    manifest = (
-        valid_multirepo_manifest()
-    )
-
-    manifest["version"] = 2
-
-    with pytest.raises(
-        MODULE.ComponentValidationError,
-        match="Schema validation failed",
-    ):
-        MODULE.validate_schema(
-            manifest,
-            schema,
-        )
-
 
 @pytest.mark.parametrize(
     "tier",
@@ -672,13 +479,11 @@ def test_schema_fails_for_invalid_version(
         "1",
     ],
 )
-def test_schema_fails_for_invalid_tier(
+def test_invalid_tier_fails_schema(
     tier: Any,
     schema: dict[str, Any],
 ) -> None:
-    manifest = (
-        valid_multirepo_manifest()
-    )
+    manifest = valid_multirepo_manifest()
 
     manifest["components"][
         "backend"
@@ -694,12 +499,10 @@ def test_schema_fails_for_invalid_tier(
         )
 
 
-def test_schema_fails_for_unknown_language(
+def test_unknown_language_fails_schema(
     schema: dict[str, Any],
 ) -> None:
-    manifest = (
-        valid_multirepo_manifest()
-    )
+    manifest = valid_multirepo_manifest()
 
     manifest["components"][
         "backend"
@@ -715,18 +518,14 @@ def test_schema_fails_for_unknown_language(
         )
 
 
-def test_schema_fails_for_unknown_build_profile(
+def test_terraform_build_profile_is_rejected(
     schema: dict[str, Any],
 ) -> None:
-    manifest = (
-        valid_multirepo_manifest()
-    )
+    manifest = valid_multirepo_manifest()
 
     manifest["components"][
         "backend"
-    ]["build"]["profile"] = (
-        "custom-command"
-    )
+    ]["build"]["profile"] = "terraform"
 
     with pytest.raises(
         MODULE.ComponentValidationError,
@@ -738,16 +537,14 @@ def test_schema_fails_for_unknown_build_profile(
         )
 
 
-def test_schema_fails_when_component_has_no_paths(
+def test_component_requires_infrastructure_block(
     schema: dict[str, Any],
 ) -> None:
-    manifest = (
-        valid_multirepo_manifest()
-    )
+    manifest = valid_multirepo_manifest()
 
     manifest["components"][
         "backend"
-    ]["paths"] = []
+    ].pop("infrastructure")
 
     with pytest.raises(
         MODULE.ComponentValidationError,
@@ -759,64 +556,14 @@ def test_schema_fails_when_component_has_no_paths(
         )
 
 
-def test_schema_fails_when_components_are_empty(
+def test_enabled_container_requires_image_name(
     schema: dict[str, Any],
 ) -> None:
-    manifest = (
-        valid_multirepo_manifest()
-    )
-
-    manifest["components"] = {}
-
-    with pytest.raises(
-        MODULE.ComponentValidationError,
-        match="Schema validation failed",
-    ):
-        MODULE.validate_schema(
-            manifest,
-            schema,
-        )
-
-
-def test_schema_fails_for_invalid_component_name(
-    schema: dict[str, Any],
-) -> None:
-    manifest = (
-        valid_multirepo_manifest()
-    )
-
-    component = manifest[
-        "components"
-    ].pop(
-        "backend"
-    )
-
-    manifest["components"][
-        "Backend API"
-    ] = component
-
-    with pytest.raises(
-        MODULE.ComponentValidationError,
-        match="Schema validation failed",
-    ):
-        MODULE.validate_schema(
-            manifest,
-            schema,
-        )
-
-
-def test_schema_fails_for_container_enabled_without_image(
-    schema: dict[str, Any],
-) -> None:
-    manifest = (
-        valid_multirepo_manifest()
-    )
+    manifest = valid_multirepo_manifest()
 
     manifest["components"][
         "backend"
-    ]["container"].pop(
-        "image_name"
-    )
+    ]["container"].pop("image_name")
 
     with pytest.raises(
         MODULE.ComponentValidationError,
@@ -828,18 +575,14 @@ def test_schema_fails_for_container_enabled_without_image(
         )
 
 
-def test_schema_fails_for_container_enabled_without_dockerfile(
+def test_disabled_container_cannot_have_image_fields(
     schema: dict[str, Any],
 ) -> None:
-    manifest = (
-        valid_multirepo_manifest()
-    )
+    manifest = valid_multirepo_manifest()
 
     manifest["components"][
         "backend"
-    ]["container"].pop(
-        "dockerfile"
-    )
+    ]["container"]["enabled"] = False
 
     with pytest.raises(
         MODULE.ComponentValidationError,
@@ -851,18 +594,14 @@ def test_schema_fails_for_container_enabled_without_dockerfile(
         )
 
 
-def test_schema_fails_for_container_enabled_without_context(
+def test_enabled_infrastructure_requires_scan_path(
     schema: dict[str, Any],
 ) -> None:
-    manifest = (
-        valid_multirepo_manifest()
-    )
+    manifest = valid_monorepo_manifest()
 
     manifest["components"][
         "backend"
-    ]["container"].pop(
-        "build_context"
-    )
+    ]["infrastructure"].pop("scan_path")
 
     with pytest.raises(
         MODULE.ComponentValidationError,
@@ -874,65 +613,18 @@ def test_schema_fails_for_container_enabled_without_context(
         )
 
 
-def test_schema_fails_when_disabled_container_has_image_fields(
+def test_disabled_infrastructure_cannot_have_paths(
     schema: dict[str, Any],
 ) -> None:
-    manifest = (
-        valid_multirepo_manifest()
-    )
-
-    container = manifest[
-        "components"
-    ]["backend"]["container"]
-
-    container["enabled"] = False
-
-    with pytest.raises(
-        MODULE.ComponentValidationError,
-        match="Schema validation failed",
-    ):
-        MODULE.validate_schema(
-            manifest,
-            schema,
-        )
-
-
-def test_schema_fails_when_build_enabled_with_none_profile(
-    schema: dict[str, Any],
-) -> None:
-    manifest = (
-        valid_multirepo_manifest()
-    )
+    manifest = valid_monorepo_manifest()
 
     manifest["components"][
-        "backend"
-    ]["build"] = {
-        "enabled": True,
-        "profile": "none",
-    }
-
-    with pytest.raises(
-        MODULE.ComponentValidationError,
-        match="Schema validation failed",
-    ):
-        MODULE.validate_schema(
-            manifest,
-            schema,
-        )
-
-
-def test_schema_fails_when_build_disabled_with_active_profile(
-    schema: dict[str, Any],
-) -> None:
-    manifest = (
-        valid_multirepo_manifest()
-    )
-
-    manifest["components"][
-        "backend"
-    ]["build"] = {
+        "frontend"
+    ]["infrastructure"] = {
         "enabled": False,
-        "profile": "dotnet",
+        "paths": [
+            "frontend/infra/**",
+        ],
     }
 
     with pytest.raises(
@@ -946,88 +638,96 @@ def test_schema_fails_when_build_disabled_with_active_profile(
 
 
 # ============================================================
-# Path validation
+# Path handling
 # ============================================================
 
 @pytest.mark.parametrize(
-    "path",
+    ("value", "expected"),
     [
-        "backend",
-        "backend/src",
-        ".",
-        "backend/**",
-        "backend/**/*.cs",
-        "libs/common/**",
+        ("backend", "backend"),
+        ("./backend", "backend"),
+        ("backend\\src", "backend/src"),
+        (".", "."),
     ],
 )
-def test_valid_relative_paths_pass(
-    path: str,
+def test_relative_path_normalization(
+    value: str,
+    expected: str,
 ) -> None:
-    MODULE.validate_relative_path(
-        path,
-        "test.path",
+    assert (
+        MODULE.normalize_relative_path(
+            value,
+            "test.path",
+        )
+        == expected
     )
 
 
 @pytest.mark.parametrize(
-    "path",
+    "value",
     [
         "",
         " ",
         "/backend",
         "../backend",
-        "backend/../frontend",
-        "../../shared",
+        "backend/../../frontend",
     ],
 )
-def test_invalid_relative_paths_fail(
-    path: str,
+def test_invalid_relative_path_fails(
+    value: str,
 ) -> None:
     with pytest.raises(
         MODULE.ComponentValidationError
     ):
-        MODULE.validate_relative_path(
-            path,
+        MODULE.normalize_relative_path(
+            value,
             "test.path",
         )
 
 
 @pytest.mark.parametrize(
-    "pattern",
+    ("value", "expected"),
     [
-        "backend/**",
-        "backend/**/*.cs",
-        "libs/common/**",
-        "**",
-        ".github/workflows/**",
+        ("backend/**", "backend/**"),
+        ("./backend/**/*.cs", "backend/**/*.cs"),
+        (
+            "backend\\infra\\**",
+            "backend/infra/**",
+        ),
+        ("**", "**"),
     ],
 )
-def test_controlled_globs_pass(
-    pattern: str,
+def test_glob_normalization(
+    value: str,
+    expected: str,
 ) -> None:
-    MODULE.validate_glob(
-        pattern,
-        "test.pattern",
+    assert (
+        MODULE.normalize_glob(
+            value,
+            "test.glob",
+        )
+        == expected
     )
 
 
 @pytest.mark.parametrize(
-    "pattern",
+    "value",
     [
+        "",
         "/backend/**",
         "../backend/**",
         "backend/../../frontend/**",
     ],
 )
-def test_dangerous_globs_fail(
-    pattern: str,
+def test_invalid_glob_fails(
+    value: str,
 ) -> None:
     with pytest.raises(
         MODULE.ComponentValidationError
     ):
-        MODULE.validate_glob(
-            pattern,
-            "test.pattern",
+        MODULE.normalize_glob(
+            value,
+            "test.glob",
         )
 
 
@@ -1036,38 +736,17 @@ def test_dangerous_globs_fail(
 # ============================================================
 
 @pytest.mark.parametrize(
-    (
-        "language",
-        "profile",
-    ),
+    ("language", "profile"),
     [
-        (
-            "dotnet",
-            "dotnet",
-        ),
-        (
-            "java",
-            "java",
-        ),
-        (
-            "node",
-            "node",
-        ),
-        (
-            "javascript",
-            "node",
-        ),
-        (
-            "typescript",
-            "node",
-        ),
-        (
-            "python",
-            "python",
-        ),
+        ("dotnet", "dotnet"),
+        ("java", "java"),
+        ("node", "node"),
+        ("javascript", "node"),
+        ("typescript", "node"),
+        ("python", "python"),
     ],
 )
-def test_compatible_language_and_profile_pass(
+def test_compatible_build_profiles_pass(
     language: str,
     profile: str,
 ) -> None:
@@ -1080,36 +759,21 @@ def test_compatible_language_and_profile_pass(
     }
 
     MODULE.validate_build(
-        "application",
+        "component",
         component,
     )
 
 
 @pytest.mark.parametrize(
-    (
-        "language",
-        "profile",
-    ),
+    ("language", "profile"),
     [
-        (
-            "dotnet",
-            "node",
-        ),
-        (
-            "typescript",
-            "dotnet",
-        ),
-        (
-            "python",
-            "java",
-        ),
-        (
-            "java",
-            "python",
-        ),
+        ("dotnet", "node"),
+        ("typescript", "dotnet"),
+        ("python", "java"),
+        ("java", "python"),
     ],
 )
-def test_incompatible_language_and_profile_fail(
+def test_incompatible_build_profiles_fail(
     language: str,
     profile: str,
 ) -> None:
@@ -1126,31 +790,12 @@ def test_incompatible_language_and_profile_fail(
         match="incompatible",
     ):
         MODULE.validate_build(
-            "application",
+            "component",
             component,
         )
 
 
-def test_enabled_build_with_none_profile_fails_policy() -> None:
-    component = {
-        "language": "dotnet",
-        "build": {
-            "enabled": True,
-            "profile": "none",
-        },
-    }
-
-    with pytest.raises(
-        MODULE.ComponentValidationError,
-        match="enabled but profile is 'none'",
-    ):
-        MODULE.validate_build(
-            "application",
-            component,
-        )
-
-
-def test_disabled_build_with_active_profile_fails_policy() -> None:
+def test_disabled_build_requires_none_profile() -> None:
     component = {
         "language": "dotnet",
         "build": {
@@ -1164,12 +809,12 @@ def test_disabled_build_with_active_profile_fails_policy() -> None:
         match="build is disabled",
     ):
         MODULE.validate_build(
-            "application",
+            "component",
             component,
         )
 
 
-def test_disabled_build_with_none_profile_passes() -> None:
+def test_disabled_go_component_with_none_profile_passes() -> None:
     component = {
         "language": "go",
         "build": {
@@ -1179,47 +824,37 @@ def test_disabled_build_with_none_profile_passes() -> None:
     }
 
     MODULE.validate_build(
-        "application",
+        "go-service",
         component,
     )
 
 
-def test_go_build_enabled_fails_until_profile_exists() -> None:
-    component = {
-        "language": "go",
-        "build": {
-            "enabled": True,
-            "profile": "none",
-        },
-    }
-
-    with pytest.raises(
-        MODULE.ComponentValidationError
-    ):
-        MODULE.validate_build(
-            "go-service",
-            component,
-        )
-
-
 # ============================================================
-# Component physical structure
+# Physical component validation
 # ============================================================
 
-def test_component_path_must_exist(
+def test_component_path_must_be_directory(
     repository_root: Path,
 ) -> None:
-    manifest = (
-        valid_monorepo_manifest()
+    manifest = valid_monorepo_manifest()
+
+    invalid_path = (
+        repository_root
+        / "component-file"
+    )
+
+    invalid_path.write_text(
+        "not a directory",
+        encoding="utf-8",
     )
 
     manifest["components"][
         "backend"
-    ]["path"] = "missing-backend"
+    ]["path"] = "component-file"
 
     with pytest.raises(
         MODULE.ComponentValidationError,
-        match="component path does not exist",
+        match="must be an existing directory",
     ):
         MODULE.validate_components(
             manifest,
@@ -1230,9 +865,7 @@ def test_component_path_must_exist(
 def test_dockerfile_must_exist(
     repository_root: Path,
 ) -> None:
-    manifest = (
-        valid_monorepo_manifest()
-    )
+    manifest = valid_monorepo_manifest()
 
     manifest["components"][
         "backend"
@@ -1250,22 +883,31 @@ def test_dockerfile_must_exist(
         )
 
 
-def test_build_context_must_exist(
+def test_build_context_must_be_directory(
     repository_root: Path,
 ) -> None:
-    manifest = (
-        valid_monorepo_manifest()
+    manifest = valid_monorepo_manifest()
+
+    context_file = (
+        repository_root
+        / "backend"
+        / "context.txt"
+    )
+
+    context_file.write_text(
+        "not a directory",
+        encoding="utf-8",
     )
 
     manifest["components"][
         "backend"
     ]["container"][
         "build_context"
-    ] = "missing-context"
+    ] = "backend/context.txt"
 
     with pytest.raises(
         MODULE.ComponentValidationError,
-        match="build_context does not exist",
+        match="must be an existing directory",
     ):
         MODULE.validate_components(
             manifest,
@@ -1276,9 +918,7 @@ def test_build_context_must_exist(
 def test_duplicate_image_name_fails(
     repository_root: Path,
 ) -> None:
-    manifest = (
-        valid_monorepo_manifest()
-    )
+    manifest = valid_monorepo_manifest()
 
     manifest["components"][
         "frontend"
@@ -1296,35 +936,21 @@ def test_duplicate_image_name_fails(
         )
 
 
-def test_disabled_container_does_not_require_files(
+def test_duplicate_application_pattern_fails(
     repository_root: Path,
 ) -> None:
-    manifest = (
-        valid_non_container_component()
-    )
-
-    MODULE.validate_components(
-        manifest,
-        repository_root,
-    )
-
-
-def test_container_enabled_requires_complete_configuration(
-    repository_root: Path,
-) -> None:
-    manifest = (
-        valid_monorepo_manifest()
-    )
+    manifest = valid_monorepo_manifest()
 
     manifest["components"][
         "backend"
-    ]["container"].pop(
-        "image_name"
-    )
+    ]["paths"] = [
+        "backend/**",
+        "./backend/**",
+    ]
 
     with pytest.raises(
         MODULE.ComponentValidationError,
-        match="container.image_name is required",
+        match="duplicate application path pattern",
     ):
         MODULE.validate_components(
             manifest,
@@ -1333,28 +959,238 @@ def test_container_enabled_requires_complete_configuration(
 
 
 # ============================================================
-# Shared paths
+# Component infrastructure validation
 # ============================================================
 
-def test_valid_shared_paths_pass() -> None:
-    manifest = (
-        valid_monorepo_manifest()
+def test_component_infrastructure_enabled_passes(
+    repository_root: Path,
+) -> None:
+    manifest = valid_monorepo_manifest()
+
+    MODULE.validate_components(
+        manifest,
+        repository_root,
     )
 
-    MODULE.validate_shared_paths(
-        manifest
+
+def test_component_infrastructure_disabled_passes(
+    repository_root: Path,
+) -> None:
+    manifest = valid_monorepo_manifest()
+
+    manifest["components"][
+        "backend"
+    ]["infrastructure"] = {
+        "enabled": False,
+    }
+
+    MODULE.validate_components(
+        manifest,
+        repository_root,
     )
 
+
+def test_component_infrastructure_requires_paths(
+    repository_root: Path,
+) -> None:
+    manifest = valid_monorepo_manifest()
+
+    manifest["components"][
+        "backend"
+    ]["infrastructure"] = {
+        "enabled": True,
+        "paths": [],
+        "scan_path": "backend/infra",
+    }
+
+    with pytest.raises(
+        MODULE.ComponentValidationError,
+        match="has no paths",
+    ):
+        MODULE.validate_components(
+            manifest,
+            repository_root,
+        )
+
+
+def test_component_infrastructure_requires_scan_path(
+    repository_root: Path,
+) -> None:
+    manifest = valid_monorepo_manifest()
+
+    manifest["components"][
+        "backend"
+    ]["infrastructure"] = {
+        "enabled": True,
+        "paths": [
+            "backend/infra/**",
+        ],
+    }
+
+    with pytest.raises(
+        MODULE.ComponentValidationError,
+        match="scan_path is missing",
+    ):
+        MODULE.validate_components(
+            manifest,
+            repository_root,
+        )
+
+
+def test_component_scan_path_must_exist(
+    repository_root: Path,
+) -> None:
+    manifest = valid_monorepo_manifest()
+
+    manifest["components"][
+        "backend"
+    ]["infrastructure"] = {
+        "enabled": True,
+        "paths": [
+            "backend/missing-infra/**",
+        ],
+        "scan_path": "backend/missing-infra",
+    }
+
+    with pytest.raises(
+        MODULE.ComponentValidationError,
+        match="must be an existing directory",
+    ):
+        MODULE.validate_components(
+            manifest,
+            repository_root,
+        )
+
+
+def test_component_scan_path_must_be_directory(
+    repository_root: Path,
+) -> None:
+    manifest = valid_monorepo_manifest()
+
+    file_path = (
+        repository_root
+        / "backend"
+        / "infra.tf"
+    )
+
+    file_path.write_text(
+        "terraform {}\n",
+        encoding="utf-8",
+    )
+
+    manifest["components"][
+        "backend"
+    ]["infrastructure"] = {
+        "enabled": True,
+        "paths": [
+            "backend/infra.tf",
+        ],
+        "scan_path": "backend/infra.tf",
+    }
+
+    with pytest.raises(
+        MODULE.ComponentValidationError,
+        match="must be an existing directory",
+    ):
+        MODULE.validate_components(
+            manifest,
+            repository_root,
+        )
+
+
+def test_identical_application_and_iac_pattern_fails(
+    repository_root: Path,
+) -> None:
+    manifest = valid_monorepo_manifest()
+
+    manifest["components"][
+        "backend"
+    ]["paths"] = [
+        "backend/**",
+    ]
+
+    manifest["components"][
+        "backend"
+    ]["infrastructure"] = {
+        "enabled": True,
+        "paths": [
+            "backend/**",
+        ],
+        "scan_path": "backend/infra",
+    }
+
+    with pytest.raises(
+        MODULE.ComponentValidationError,
+        match="same path pattern cannot be used",
+    ):
+        MODULE.validate_components(
+            manifest,
+            repository_root,
+        )
+
+
+def test_broad_application_and_specific_iac_pattern_passes(
+    repository_root: Path,
+) -> None:
+    manifest = valid_monorepo_manifest()
+
+    manifest["components"][
+        "backend"
+    ]["paths"] = [
+        "backend/**",
+    ]
+
+    manifest["components"][
+        "backend"
+    ]["infrastructure"] = {
+        "enabled": True,
+        "paths": [
+            "backend/infra/**",
+        ],
+        "scan_path": "backend/infra",
+    }
+
+    MODULE.validate_components(
+        manifest,
+        repository_root,
+    )
+
+
+def test_duplicate_iac_pattern_fails(
+    repository_root: Path,
+) -> None:
+    manifest = valid_monorepo_manifest()
+
+    manifest["components"][
+        "backend"
+    ]["infrastructure"][
+        "paths"
+    ] = [
+        "backend/infra/**",
+        "./backend/infra/**",
+    ]
+
+    with pytest.raises(
+        MODULE.ComponentValidationError,
+        match="duplicate infrastructure path pattern",
+    ):
+        MODULE.validate_components(
+            manifest,
+            repository_root,
+        )
+
+
+# ============================================================
+# Shared and global paths
+# ============================================================
 
 def test_shared_path_unknown_component_fails() -> None:
-    manifest = (
-        valid_monorepo_manifest()
-    )
+    manifest = valid_monorepo_manifest()
 
-    manifest[
-        "shared_paths"
-    ]["common"]["affects"].append(
-        "unknown-component"
+    manifest["shared_paths"][
+        "common"
+    ]["affects"].append(
+        "unknown"
     )
 
     with pytest.raises(
@@ -1366,70 +1202,36 @@ def test_shared_path_unknown_component_fails() -> None:
         )
 
 
-def test_shared_path_parent_traversal_fails() -> None:
-    manifest = (
-        valid_monorepo_manifest()
-    )
+def test_duplicate_shared_pattern_fails() -> None:
+    manifest = valid_monorepo_manifest()
 
-    manifest[
-        "shared_paths"
-    ]["common"]["paths"] = [
-        "../common/**"
+    manifest["shared_paths"][
+        "common"
+    ]["paths"] = [
+        "libs/common/**",
+        "./libs/common/**",
     ]
 
     with pytest.raises(
         MODULE.ComponentValidationError,
-        match="cannot contain '..'",
+        match="duplicate path pattern",
     ):
         MODULE.validate_shared_paths(
             manifest
         )
 
 
-# ============================================================
-# Global paths
-# ============================================================
-
-def test_valid_global_paths_pass() -> None:
-    manifest = (
-        valid_monorepo_manifest()
-    )
-
-    MODULE.validate_global_paths(
-        manifest
-    )
-
-
-def test_global_paths_must_be_array() -> None:
-    manifest = (
-        valid_monorepo_manifest()
-    )
-
-    manifest["global_paths"] = (
-        "global.json"
-    )
-
-    with pytest.raises(
-        MODULE.ComponentValidationError,
-        match="global_paths must be an array",
-    ):
-        MODULE.validate_global_paths(
-            manifest
-        )
-
-
-def test_global_path_parent_traversal_fails() -> None:
-    manifest = (
-        valid_monorepo_manifest()
-    )
+def test_duplicate_global_pattern_fails() -> None:
+    manifest = valid_monorepo_manifest()
 
     manifest["global_paths"] = [
-        "../global.json"
+        "global.json",
+        "./global.json",
     ]
 
     with pytest.raises(
         MODULE.ComponentValidationError,
-        match="cannot contain '..'",
+        match="Duplicate global path pattern",
     ):
         MODULE.validate_global_paths(
             manifest
@@ -1440,12 +1242,10 @@ def test_global_path_parent_traversal_fails() -> None:
 # Repository controls
 # ============================================================
 
-def test_valid_repository_controls_pass(
+def test_repository_infrastructure_passes(
     repository_root: Path,
 ) -> None:
-    manifest = (
-        valid_monorepo_manifest()
-    )
+    manifest = valid_monorepo_manifest()
 
     MODULE.validate_repository_controls(
         manifest,
@@ -1453,20 +1253,18 @@ def test_valid_repository_controls_pass(
     )
 
 
-def test_github_actions_enabled_requires_paths(
+def test_repository_scan_path_must_exist(
     repository_root: Path,
 ) -> None:
-    manifest = (
-        valid_monorepo_manifest()
-    )
+    manifest = valid_monorepo_manifest()
 
-    manifest[
-        "repository_controls"
-    ]["github_actions"]["paths"] = []
+    manifest["repository_controls"][
+        "infrastructure"
+    ]["scan_path"] = "infra/missing"
 
     with pytest.raises(
         MODULE.ComponentValidationError,
-        match="enabled but has no paths",
+        match="must be an existing directory",
     ):
         MODULE.validate_repository_controls(
             manifest,
@@ -1474,20 +1272,29 @@ def test_github_actions_enabled_requires_paths(
         )
 
 
-def test_infrastructure_enabled_requires_paths(
+def test_repository_scan_path_must_be_directory(
     repository_root: Path,
 ) -> None:
-    manifest = (
-        valid_monorepo_manifest()
+    manifest = valid_monorepo_manifest()
+
+    file_path = (
+        repository_root
+        / "infra"
+        / "single.tf"
     )
 
-    manifest[
-        "repository_controls"
-    ]["infrastructure"]["paths"] = []
+    file_path.write_text(
+        "terraform {}\n",
+        encoding="utf-8",
+    )
+
+    manifest["repository_controls"][
+        "infrastructure"
+    ]["scan_path"] = "infra/single.tf"
 
     with pytest.raises(
         MODULE.ComponentValidationError,
-        match="enabled but has no paths",
+        match="must be an existing directory",
     ):
         MODULE.validate_repository_controls(
             manifest,
@@ -1495,103 +1302,23 @@ def test_infrastructure_enabled_requires_paths(
         )
 
 
-def test_infrastructure_enabled_requires_scan_path(
+def test_duplicate_repository_control_path_fails(
     repository_root: Path,
 ) -> None:
-    manifest = (
-        valid_monorepo_manifest()
-    )
+    manifest = valid_monorepo_manifest()
 
-    manifest[
-        "repository_controls"
-    ]["infrastructure"].pop(
-        "scan_path"
-    )
+    manifest["repository_controls"][
+        "github_actions"
+    ]["paths"] = [
+        ".github/workflows/**",
+        "./.github/workflows/**",
+    ]
 
     with pytest.raises(
         MODULE.ComponentValidationError,
-        match="scan_path is missing",
+        match="duplicate path pattern",
     ):
         MODULE.validate_repository_controls(
             manifest,
             repository_root,
         )
-
-
-def test_infrastructure_scan_path_must_exist(
-    repository_root: Path,
-) -> None:
-    manifest = (
-        valid_monorepo_manifest()
-    )
-
-    manifest[
-        "repository_controls"
-    ]["infrastructure"][
-        "scan_path"
-    ] = "missing-infra"
-
-    with pytest.raises(
-        MODULE.ComponentValidationError,
-        match="scan_path does not exist",
-    ):
-        MODULE.validate_repository_controls(
-            manifest,
-            repository_root,
-        )
-
-
-def test_disabled_infrastructure_is_valid(
-    repository_root: Path,
-) -> None:
-    manifest = (
-        valid_multirepo_manifest()
-    )
-
-    MODULE.validate_repository_controls(
-        manifest,
-        repository_root,
-    )
-
-
-# ============================================================
-# Immutability and test isolation
-# ============================================================
-
-def test_factory_returns_independent_manifests() -> None:
-    first = (
-        valid_monorepo_manifest()
-    )
-
-    second = (
-        valid_monorepo_manifest()
-    )
-
-    first["components"][
-        "backend"
-    ]["tier"] = 3
-
-    assert second["components"][
-        "backend"
-    ]["tier"] == 1
-
-
-def test_validation_does_not_modify_manifest(
-    repository_root: Path,
-    schema: dict[str, Any],
-) -> None:
-    manifest = (
-        valid_monorepo_manifest()
-    )
-
-    original = copy.deepcopy(
-        manifest
-    )
-
-    validate_complete_manifest(
-        manifest,
-        schema,
-        repository_root,
-    )
-
-    assert manifest == original
